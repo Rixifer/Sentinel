@@ -5,7 +5,7 @@
     "Description": "Draws AoE mechanic indicators directly on the game ground. Reveals untelegraphed AoEs. Orange\u2192red cast progress. Complements BossModReborn.",
     "InternalName": "Sentinel",
     "AssemblyVersion": "0.1.0.0",
-    "RepoUrl": "",
+    "RepoUrl": "https://github.com/Rixifer/Sentinel",
     "ApplicableVersion": "any",
     "Tags": ["combat", "ui", "overlay"],
     "CategoryTags": ["UI"],

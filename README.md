@@ -2,6 +2,19 @@
 
 An enhanced AoE indicator system for FFXIV. Sentinel improves combat readability by recoloring native ground indicators with a cast-progress gradient and spawning indicators for attacks the game doesn't telegraph.
 
+## Installation
+
+1. Open FFXIV with [XIVLauncher](https://goatcorp.github.io/) and Dalamud enabled
+2. Type `/xlsettings` in game chat
+3. Go to the **Experimental** tab
+4. Under **Custom Plugin Repositories**, paste the following URL into an empty box:
+   ```
+   https://raw.githubusercontent.com/Rixifer/Sentinel/main/pluginmaster.json
+   ```
+5. Click the **+** button, then **Save and Close**
+6. Open the plugin installer with `/xlplugins`
+7. Find **Sentinel** in the list and click **Install**
+
 ## Features
 
 ### Enhanced Omen Recoloring
@@ -24,28 +37,8 @@ An enhanced AoE indicator system for FFXIV. Sentinel improves combat readability
 ### Detection System
 - Network-level cast detection via packet interception (catches casts instantly)
 - CreateOmen hook tracking (catches every native omen the game creates)
-- Multi-target AoE support (boss fires 5 rockets → all 5 get gradients)
+- Multi-target AoE support (boss fires multiple AoEs → all get gradients)
 - Automatic VFX lifecycle management
-
-## Installation
-
-### Requirements
-- FFXIV with [XIVLauncher](https://goatcorp.github.io/) and Dalamud
-- .NET 10 SDK (for building from source)
-
-### Building
-```bash
-cd Sentinel
-dotnet build -c Release
-```
-
-### Installing
-Copy the build output to your Dalamud dev plugins folder:
-```
-%appdata%\XIVLauncher\devPlugins\Sentinel\
-```
-
-Make sure `Data\BmrShapes.json` and `Data\ExcludedActions.json` are included in the copy.
 
 ## Usage
 
@@ -57,8 +50,20 @@ Make sure `Data\BmrShapes.json` and `Data\ExcludedActions.json` are included in 
 
 Open settings with `/sentinel` to configure:
 - **General** — detection range, AoE indicator style
-- **Colors** — start/end gradient colors, presets, opacity
+- **Colors** — start/end gradient colors, accessibility presets, opacity
 - **Shapes** — shape type filters (coming soon)
+
+## Building from Source
+
+### Requirements
+- .NET 10 SDK
+- Dalamud dev environment
+
+### Build
+```bash
+cd Sentinel
+dotnet build -c Release
+```
 
 ## Credits
 

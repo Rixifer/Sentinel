@@ -11,7 +11,7 @@ obj/
 # Rider
 .idea/
 
-# Development artifacts — prompts, research, tools
+# Development artifacts
 CLAUDE_CODE_*.md
 SENTINEL_REWRITE_PLAN.md
 Research/
@@ -20,8 +20,10 @@ Tools/
 # Debug artifacts
 debug_snapshot.txt
 
-# Scripts
+# Scripts and packaging
 copy_project.bat
+release.bat
+Sentinel.zip
 
 # OS
 Thumbs.db
