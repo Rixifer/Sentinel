@@ -1,0 +1,28 @@
+# Build outputs
+bin/
+obj/
+
+# IDE
+.vs/
+*.user
+*.suo
+*.userprefs
+
+# Rider
+.idea/
+
+# Development artifacts — prompts, research, tools
+CLAUDE_CODE_*.md
+SENTINEL_REWRITE_PLAN.md
+Research/
+Tools/
+
+# Debug artifacts
+debug_snapshot.txt
+
+# Scripts
+copy_project.bat
+
+# OS
+Thumbs.db
+.DS_Store
