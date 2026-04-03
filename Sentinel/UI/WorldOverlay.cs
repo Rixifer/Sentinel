@@ -392,7 +392,10 @@ public class WorldOverlay
 
     /// <summary>
     /// Tests whether the player (2D XZ position) is inside the AoE described by <paramref name="cast"/>.
-    /// Shape is determined from ShapeInfo (custom omens) or Lumina CastType (native omens).
+    /// Three-tier shape resolution:
+    ///   Tier 1 — Omen VFX path (exact: cone angle from filename, donut ratio from table)
+    ///   Tier 2 — ShapeInfo string (exact: from BMR/Lumina custom omen spawner)
+    ///   Tier 3 — CastType from Lumina (fallback for untelegraphed actions with OmenId=0)
     /// </summary>
     private bool IsPlayerHitByCast(Vector2 playerPos, ActiveCast cast,
         out string shapeName, out float radius, out float dist)
@@ -401,31 +404,48 @@ public class WorldOverlay
         radius    = 0f;
         dist      = 0f;
 
-        // Determine shape from ShapeInfo string first, then Lumina CastType fallback
-        if (!ParseShapeInfo(cast.ShapeInfo, out var shape))
+        // Tier 1: omen path (exact shape type, cone angle, donut ratio)
+        ShapeParams shape    = default;
+        bool fromOmenPath    = cast.OmenId > 0 &&
+                               TryGetShapeFromOmenPath(cast.OmenId, cast.ActionId, out shape);
+        // Tier 2: ShapeInfo string (custom omens)  |  Tier 3: CastType fallback
+        if (!fromOmenPath && !ParseShapeInfo(cast.ShapeInfo, out shape))
             GetShapeFromLumina(cast.CastType, cast.ActionId, out shape);
 
-        // Radius override — two strategies, checked in order:
-        //
-        // 1. Native omen (hook-tracked, IndicatorType="NATIVE"): a6 from CreateOmen is the
-        //    authoritative outer radius and already includes the caster's hitbox. Use it directly.
-        //    Do NOT add CasterHitboxRadius again.
-        //
-        // 2. Custom/Phase-2 omen (BMR or Lumina fallback): EffectRange is measured from the
-        //    edge of the caster's hitbox, so add CasterHitboxRadius for caster-centred shapes.
+        // ── Radius application ─────────────────────────────────────────────
+        // Strategy A: OmenRadius (a6) is authoritative — already includes caster hitbox.
+        //             For donuts from the omen path, InnerRadius is a ratio [0..1] and
+        //             must be converted to yalms now that we know the outer radius.
+        // Strategy B: No a6 data — apply hitbox for caster-centred shapes manually.
+        //             For donuts from the omen path, derive inner from EffectRange + hitbox.
         if (cast.OmenRadius.HasValue)
         {
-            float r     = cast.OmenRadius.Value;
+            float r      = cast.OmenRadius.Value;
             shape.Radius = r;
             shape.Range  = r;
-            // InnerRadius is not available from a6 — keep as-parsed (0 = no safe zone for CT10)
+            // Donut from omen path: stored ratio → actual inner radius in yalms
+            if (fromOmenPath && shape.Shape == HitShape.Donut &&
+                shape.InnerRadius > 0f && shape.InnerRadius < 1f)
+                shape.InnerRadius *= r;
         }
         else if (!cast.IsGroundTargeted && cast.CasterHitboxRadius > 0f)
         {
             float hb = cast.CasterHitboxRadius;
-            shape.Radius      += hb;
-            shape.Range       += hb;
-            shape.InnerRadius += hb;
+            if (fromOmenPath && shape.Shape == HitShape.Donut &&
+                shape.InnerRadius > 0f && shape.InnerRadius < 1f)
+            {
+                // Ratio stored — compute inner from EffectRange + hitbox
+                float outer       = GetEffectRange(cast.ActionId) + hb;
+                shape.Radius      = outer;
+                shape.Range       = outer;
+                shape.InnerRadius = shape.InnerRadius * outer;
+            }
+            else
+            {
+                shape.Radius      += hb;
+                shape.Range       += hb;
+                shape.InnerRadius += hb;
+            }
         }
 
         shapeName = shape.Shape.ToString();
@@ -589,32 +609,108 @@ public class WorldOverlay
 
         shape = castType switch
         {
-            3 => new ShapeParams // Rect / line AoE
-            {
-                Shape     = HitShape.Rect,
-                Range     = range,
-                Radius    = range,
-                // XAxisModifier for rects is the full width — store half
-                HalfWidth = xAxis > 0f ? xAxis * 0.5f : 2f,
-            },
-            4 => new ShapeParams // Cone / fan AoE
+            // CT3 / CT13 = Cone (verified: omen IDs 3, 4, 5, 105, 184, 185, 508 are all cones)
+            3 or 13 => new ShapeParams
             {
                 Shape     = HitShape.Cone,
                 Range     = range,
                 Radius    = range,
-                // XAxisModifier for cones is typically the total angle in degrees
                 HalfAngle = (xAxis > 0f ? xAxis * 0.5f : 45f) * MathF.PI / 180f,
             },
-            10 => new ShapeParams // Donut — inner radius not available from Lumina alone
-            {                      // InnerRadius = 0 means "safe zone unknown; treat as full circle"
+            // CT4 / CT12 = Rect (verified: omen ID 2 is rect; CT12 is a wider/ground variant)
+            4 or 12 => new ShapeParams
+            {
+                Shape     = HitShape.Rect,
+                Range     = range,
+                Radius    = range,
+                HalfWidth = xAxis > 0f ? xAxis * 0.5f : 2f,
+            },
+            // CT8 = Charge/dash line (ER=0, actual range is distance to target — unknown here)
+            // Skip hit detection for charges since we can't determine the line length.
+            8 => new ShapeParams { Shape = HitShape.Rect, Range = 0f, Radius = 0f },
+            // CT10 = Donut (inner radius not available from Lumina — 0 means safe zone unknown)
+            10 => new ShapeParams
+            {
                 Shape       = HitShape.Donut,
                 Radius      = range,
                 InnerRadius = 0f,
             },
-            // 2 = Circle, 5 = proximity/ring (inner radius unknown from CastType alone → circle)
-            // Everything else falls through to circle approximation
+            // CT11 = Cross (two overlapping rects at 90°) — no HitShape.Cross yet,
+            // approximate as circle. Conservative: detects in the gaps between arms.
+            11 => new ShapeParams { Shape = HitShape.Circle, Radius = range },
+            // CT2, CT5, CT7 = Circle variants. Everything else falls to circle.
             _ => new ShapeParams { Shape = HitShape.Circle, Radius = range },
         };
+    }
+
+    // ── Omen path shape resolver (Tier 1) ────────────────────────────────
+
+    /// <summary>
+    /// Resolves the hit-detection shape directly from the omen VFX filename.
+    /// <list type="bullet">
+    ///   <item>Cone angle from <c>gl_fan{NNN}_</c> suffix</item>
+    ///   <item>Donut ratio from the <see cref="OmenPathDecoder"/> table (InnerRadius is stored
+    ///         as a ratio [0..1] — the caller must multiply by the actual outer radius)</item>
+    ///   <item>Rect HalfWidth from Lumina XAxisModifier (not encoded in the path)</item>
+    /// </list>
+    /// Returns false when the omen ID has no path or an unrecognised filename pattern.
+    /// </summary>
+    private bool TryGetShapeFromOmenPath(uint omenId, uint actionId, out ShapeParams shape)
+    {
+        shape = default;
+
+        string? path = _plugin._omenReader.GetOmenPath(omenId);
+        if (path == null) return false;
+
+        ShapeType? shapeType = OmenPathDecoder.InferShapeType(path);
+        if (shapeType == null) return false;
+
+        switch (shapeType.Value)
+        {
+            case ShapeType.Circle:
+                shape = new ShapeParams { Shape = HitShape.Circle };
+                return true;
+
+            case ShapeType.Cone:
+            {
+                // Parse total angle from filename (e.g. gl_fan090 → 90°); default 90° if missing
+                int totalDeg = OmenPathDecoder.ParseConeAngle(path) ?? 90;
+                shape = new ShapeParams
+                {
+                    Shape     = HitShape.Cone,
+                    HalfAngle = totalDeg * 0.5f * MathF.PI / 180f,
+                    // Range/Radius filled in from OmenRadius or EffectRange by the caller
+                };
+                return true;
+            }
+
+            case ShapeType.Rect:
+            {
+                // Width not encoded in the omen filename — use Lumina XAxisModifier
+                float xAxis = GetXAxisModifier(actionId);
+                shape = new ShapeParams
+                {
+                    Shape     = HitShape.Rect,
+                    HalfWidth = xAxis > 0f ? xAxis * 0.5f : 2f,
+                };
+                return true;
+            }
+
+            case ShapeType.Donut:
+            {
+                // Store ratio [0..1] in InnerRadius — caller converts to yalms once outer radius known
+                float ratio = OmenPathDecoder.GetDonutRatio(path) ?? 0f;
+                shape = new ShapeParams
+                {
+                    Shape       = HitShape.Donut,
+                    InnerRadius = ratio,
+                };
+                return true;
+            }
+
+            default:
+                return false;
+        }
     }
 
     // ── Lumina helpers ────────────────────────────────────────────────────

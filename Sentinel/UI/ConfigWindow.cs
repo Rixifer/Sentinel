@@ -31,7 +31,7 @@ public class ConfigWindow : Window
         new(1.0f, 0.4f, 0.8f, 1.0f),          // 4 Pink
     };
 
-    public ConfigWindow(Plugin plugin) : base("Sentinel Settings v0.4.0.0###SentinelConfig")
+    public ConfigWindow(Plugin plugin) : base("Sentinel Settings v0.4.1.0###SentinelConfig")
     {
         _plugin = plugin;
         SizeConstraints = new WindowSizeConstraints
