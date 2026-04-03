@@ -22,6 +22,7 @@ public class Plugin : IDalamudPlugin
     [PluginService] internal static IChatGui               ChatGui          { get; private set; } = null!;
     [PluginService] internal static IGameInteropProvider   GameInterop      { get; private set; } = null!;
     [PluginService] internal static ISigScanner            SigScanner       { get; private set; } = null!;
+    [PluginService] internal static ICondition             Condition        { get; private set; } = null!;
 
     private const string CmdMain = "/sentinel";
 
@@ -41,18 +42,19 @@ public class Plugin : IDalamudPlugin
     private readonly WindowSystem _windowSystem = new("Sentinel");
     private readonly ConfigWindow _configWindow;
     private readonly DebugWindow  _debugWindow;
+    private readonly WorldOverlay _worldOverlay;
 
-    private IReadOnlyList<ActiveCast> _lastCasts = new List<ActiveCast>();
+    internal IReadOnlyList<ActiveCast> _lastCasts = new List<ActiveCast>();
 
     public Plugin()
     {
         Config = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
 
-        if (Config.Version < 9)
+        if (Config.Version < 12)
         {
-            Config.Version = 9;
+            Config.Version = 12;
             Config.Save();
-            Log.Information("[Sentinel] Config updated to version 9.");
+            Log.Information("[Sentinel] Config updated to version 12.");
         }
 
         _omenReader      = new OmenSheetReader(DataManager);
@@ -68,6 +70,7 @@ public class Plugin : IDalamudPlugin
 
         _configWindow = new ConfigWindow(this);
         _debugWindow  = new DebugWindow(this);
+        _worldOverlay = new WorldOverlay(this);
         _windowSystem.AddWindow(_configWindow);
         _windowSystem.AddWindow(_debugWindow);
 
@@ -105,6 +108,7 @@ public class Plugin : IDalamudPlugin
     private void DrawUI()
     {
         _windowSystem.Draw();
+        _worldOverlay.Draw();
         _debugWindow.Update(_lastCasts);
     }
 

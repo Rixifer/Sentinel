@@ -90,7 +90,7 @@ public class CastScanner
         if (!_config.Enabled) return _result;
 
         var localPlayer = _objectTable.LocalPlayer;
-        var playerPos   = localPlayer?.Position ?? Vector3.Zero;
+        var playerPos   = localPlayer?.Position ?? Vector3.Zero; // kept for future use
 
         // ── Step 1: Drain network queues ──────────────────────────────────
         bool hasNetEvents =
@@ -108,7 +108,6 @@ public class CastScanner
             while (_netListener.CastStarts.TryDequeue(out var ev))
             {
                 if (!_entityMap.TryGetValue(ev.EntityId, out var obj)) continue;
-                if (Vector3.Distance(playerPos, obj.Position) > _config.MaxRange) continue;
                 if (!IsTrackedObject(obj)) continue;
 
                 uint actionId = ev.ActionId;
@@ -351,6 +350,11 @@ public class CastScanner
         // ── Step 3: Recolor hook-tracked omens not handled by Step 2 ─────
         // These are omens from helper entities or EventObj with no matching network cast.
         // Keyed by VfxData* — each omen tracked independently regardless of source entity.
+        //
+        // Liveness check: read Instance directly from VfxData*+0x1B8. The game sets
+        // Instance to null before freeing VfxData, so a null Instance means the omen
+        // has been destroyed. No entity lookup required — a2 from CreateOmenDetour does
+        // not reliably match IGameObject.Address in the ObjectTable.
         if (_hookOmens.Count > 0)
         {
             if (_addressMap.Count == 0) BuildEntityMaps();
@@ -362,44 +366,28 @@ public class CastScanner
                 nint vfxDataPtr = kvp.Key;
                 var  hookOmen   = kvp.Value;
 
-                // Find entity in ObjectTable by address (may be null if entity despawned)
-                _addressMap.TryGetValue(hookOmen.EntityAddress, out var obj);
+                // Read Instance pointer directly from VfxData*+0x1B8.
+                // If null, the game has destroyed the omen — remove from tracking.
+                nint instancePtr;
+                unsafe { instancePtr = *(nint*)((byte*)vfxDataPtr + 0x1B8); }
 
-                // Validate that VfxData* is still referenced in the entity's VfxContainer.
-                // This check uses only entity memory (validated via ObjectTable) — never touches
-                // VfxData itself — so it's safe even if VfxData was freed.
-                bool alive = false;
-                if (obj != null)
-                    unsafe { alive = IsVfxDataAlive(hookOmen.EntityAddress, vfxDataPtr); }
-
-                if (!alive)
+                if (instancePtr == nint.Zero)
                 {
-                    DebugLog.Add("HOOK-REMOVE",
-                        $"VfxData=0x{vfxDataPtr:X} — entity gone or not in VfxContainer");
+                    DebugLog.Add("HOOK-REMOVE", $"VfxData=0x{vfxDataPtr:X} — Instance null (omen destroyed)");
                     hookToRemove.Add(vfxDataPtr);
                     continue;
                 }
 
-                // Read Instance pointer from VfxData* directly (offset 0x1B8).
-                // Safe because IsVfxDataAlive confirmed this VfxData* is still referenced.
-                unsafe
-                {
-                    nint instancePtr = *(nint*)((byte*)vfxDataPtr + 0x1B8);
-                    if (instancePtr != nint.Zero)
-                    {
-                        float progress = ComputeHookOmenProgress(obj, hookOmen);
-                        _omenManager.RecolorInstance(instancePtr, progress);
-                        Plugin.Log.Debug(
-                            "[Sentinel][HOOK-RECOLOR] Omen VfxData=0x{V:X} entity=0x{A:X} (progress={P:F2})",
-                            vfxDataPtr, hookOmen.EntityAddress, progress);
-                    }
-                    else
-                    {
-                        // Instance went null — omen is being destroyed
-                        DebugLog.Add("HOOK-REMOVE", $"VfxData=0x{vfxDataPtr:X} — Instance null, omen destroyed");
-                        hookToRemove.Add(vfxDataPtr);
-                    }
-                }
+                // Try to find the entity for cast bar progress timing (nice-to-have).
+                // a2 may not match ObjectTable addresses, so obj may be null — that's fine,
+                // ComputeHookOmenProgress falls back to elapsed-time Strategy C.
+                _addressMap.TryGetValue(hookOmen.EntityAddress, out var obj);
+
+                float progress = ComputeHookOmenProgress(obj, hookOmen);
+                _omenManager.RecolorInstance(instancePtr, progress);
+                Plugin.Log.Debug(
+                    "[Sentinel][HOOK-RECOLOR] Omen VfxData=0x{V:X} entity=0x{A:X} (progress={P:F2})",
+                    vfxDataPtr, hookOmen.EntityAddress, progress);
             }
 
             foreach (var key in hookToRemove)
@@ -432,24 +420,6 @@ public class CastScanner
         // Strategy C: use time since hook fired / default duration
         float elapsedSinceHook = (Environment.TickCount64 - hookOmen.CreationTicks) / 1000f;
         return Math.Clamp(elapsedSinceHook / DefaultDuration, 0f, 1f);
-    }
-
-    /// <summary>
-    /// Returns true if <paramref name="vfxDataPtr"/> appears in any of the entity's
-    /// VfxContainer slots (indices 0–13). Only reads entity memory validated via
-    /// ObjectTable — never touches VfxData itself.
-    /// </summary>
-    private static unsafe bool IsVfxDataAlive(nint entityAddr, nint vfxDataPtr)
-    {
-        // VfxContainer._vfxData array starts at BattleChara+0x19A0
-        // Each element is a Pointer<VfxData> (8 bytes). 14 slots total.
-        const int VfxContainerArrayOffset = 0x19A0;
-        for (int i = 0; i < 14; i++)
-        {
-            nint slotPtr = *(nint*)((byte*)entityAddr + VfxContainerArrayOffset + i * 8);
-            if (slotPtr == vfxDataPtr) return true;
-        }
-        return false;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────

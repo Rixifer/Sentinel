@@ -5,15 +5,15 @@
         "Punchline": "Ground-projected AoE visualization for all content",
         "Description": "Draws AoE mechanic indicators directly on the game ground. Reveals untelegraphed AoEs with a cast-progress color gradient. Complements BossModReborn.",
         "InternalName": "Sentinel",
-        "AssemblyVersion": "0.1.0.0",
+        "AssemblyVersion": "0.2.0.0",
         "TestingAssemblyVersion": null,
         "RepoUrl": "https://github.com/Rixifer/Sentinel",
         "ApplicableVersion": "any",
         "DalamudApiLevel": 14,
         "IsHide": false,
         "IsTestingExclusive": false,
-        "DownloadLinkInstall": "https://github.com/Rixifer/Sentinel/releases/download/latest/Sentinel.zip",
-        "DownloadLinkUpdate": "https://github.com/Rixifer/Sentinel/releases/download/latest/Sentinel.zip",
-        "DownloadLinkTesting": "https://github.com/Rixifer/Sentinel/releases/download/latest/Sentinel.zip"
+        "DownloadLinkInstall": "https://github.com/Rixifer/Sentinel/releases/download/0.2.0/Sentinel.zip",
+        "DownloadLinkUpdate": "https://github.com/Rixifer/Sentinel/releases/download/0.2.0/Sentinel.zip",
+        "DownloadLinkTesting": "https://github.com/Rixifer/Sentinel/releases/download/0.2.0/Sentinel.zip"
     }
 ]
