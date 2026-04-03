@@ -71,7 +71,9 @@ public class WorldOverlay
                 DrawHitboxDot(drawList, playerObj);
         }
 
-        if (Config.ShowActionNames)
+        if (Config.ShowCastBar)
+            DrawCastBars(drawList);
+        else if (Config.ShowActionNames)
             DrawActionNames(drawList);
 
         if (Config.ShowHitWarning && playerObj != null)
@@ -108,6 +110,11 @@ public class WorldOverlay
         if (Config.ShowHitboxRing2 && Config.HitboxRingRadius2 > 0f)
             DrawWorldRing(drawList, center, Config.HitboxRingRadius2,
                 Config.HitboxRingColor2, Config.HitboxRingThickness2);
+
+        // Range Ring 3
+        if (Config.ShowHitboxRing3 && Config.HitboxRingRadius3 > 0f)
+            DrawWorldRing(drawList, center, Config.HitboxRingRadius3,
+                Config.HitboxRingColor3, Config.HitboxRingThickness3);
     }
 
     /// <summary>
@@ -155,10 +162,86 @@ public class WorldOverlay
     private static bool IsInCombat()
         => Plugin.Condition[ConditionFlag.InCombat];
 
-    // ── Feature 2: Action name floating labels ────────────────────────────
-    // TODO: Consider loading TrumpGothic via UiBuilder.FontAtlas.NewGameFontHandle
-    //       for a more FFXIV-native look. Currently uses the default ImGui font scaled
-    //       to Config.ActionNameSize. Async font compilation makes this non-trivial.
+    // ── Feature 2a: Cast bar overlay ──────────────────────────────────────
+
+    private void DrawCastBars(ImDrawListPtr drawList)
+    {
+        var casts = _plugin._lastCasts;
+        if (casts == null) return;
+
+        float barW = Config.CastBarWidth;
+        float barH = Config.CastBarHeight;
+
+        uint bgColor     = ImGui.ColorConvertFloat4ToU32(Config.CastBarBgColor);
+        uint fillColor   = ImGui.ColorConvertFloat4ToU32(Config.CastBarFillColor);
+        uint borderColor = ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, 0.9f));
+
+        using (_axisFont?.Push())
+        {
+            var   font     = ImGui.GetFont();
+            float nameSize = Config.ActionNameSize;
+            float timeSize = MathF.Max(nameSize * 0.75f, 10f);
+
+            foreach (var cast in casts)
+            {
+                if (!cast.HasOmen) continue;
+
+                var worldPos = cast.IsGroundTargeted && cast.TargetPosition != Vector3.Zero
+                    ? cast.TargetPosition
+                    : cast.CasterPosition;
+                worldPos.Y += 1.0f;
+
+                if (!Plugin.GameGui.WorldToScreen(worldPos, out var screenPos)) continue;
+
+                float progress = cast.Progress;
+
+                // ── Action name above bar ─────────────────────────────────
+                if (Config.ShowCastBarName && !string.IsNullOrEmpty(cast.ActionName))
+                {
+                    string text     = cast.ActionName;
+                    var    textSize = ImGui.CalcTextSizeA(font, nameSize, float.MaxValue, 0f, text, out _);
+                    var    textPos  = new Vector2(screenPos.X - textSize.X * 0.5f,
+                                                  screenPos.Y - textSize.Y - barH - 2f);
+
+                    uint shadowCol = ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, 0.8f));
+                    uint textCol   = ImGui.ColorConvertFloat4ToU32(Config.ActionNameColor);
+                    drawList.AddText(font, nameSize, textPos + new Vector2(1f, 1f), shadowCol, text, 0f);
+                    drawList.AddText(font, nameSize, textPos, textCol, text, 0f);
+                }
+
+                // ── Bar background ────────────────────────────────────────
+                var barTL = new Vector2(screenPos.X - barW * 0.5f, screenPos.Y - barH);
+                var barBR = new Vector2(screenPos.X + barW * 0.5f, screenPos.Y);
+
+                drawList.AddRectFilled(barTL, barBR, bgColor, 2f);
+
+                // ── Fill ──────────────────────────────────────────────────
+                float fillW  = barW * Math.Clamp(progress, 0f, 1f);
+                var   fillBR = new Vector2(barTL.X + fillW, barBR.Y);
+                if (fillW > 0f)
+                    drawList.AddRectFilled(barTL, fillBR, fillColor, 2f);
+
+                // ── Border ────────────────────────────────────────────────
+                drawList.AddRect(barTL, barBR, borderColor, 2f, ImDrawFlags.None, 1f);
+
+                // ── Remaining time below bar ──────────────────────────────
+                if (Config.ShowCastBarTime && cast.TotalCastTime > 0f)
+                {
+                    float remaining = cast.TotalCastTime * (1f - progress);
+                    string timeText = $"{remaining:F1}s";
+                    var    tSize    = ImGui.CalcTextSizeA(font, timeSize, float.MaxValue, 0f, timeText, out _);
+                    var    tPos     = new Vector2(screenPos.X - tSize.X * 0.5f, screenPos.Y + 2f);
+
+                    uint shadowCol = ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, 0.8f));
+                    uint timeCol   = ImGui.ColorConvertFloat4ToU32(new Vector4(1f, 1f, 1f, 0.9f));
+                    drawList.AddText(font, timeSize, tPos + new Vector2(1f, 1f), shadowCol, timeText, 0f);
+                    drawList.AddText(font, timeSize, tPos, timeCol, timeText, 0f);
+                }
+            }
+        }
+    }
+
+    // ── Feature 2b: Action name floating labels (standalone, used when cast bar off) ──
 
     private void DrawActionNames(ImDrawListPtr drawList)
     {
@@ -322,11 +405,22 @@ public class WorldOverlay
         if (!ParseShapeInfo(cast.ShapeInfo, out var shape))
             GetShapeFromLumina(cast.CastType, cast.ActionId, out shape);
 
-        // Caster-centered AoEs: EffectRange is measured from the EDGE of the caster's hitbox,
-        // so the actual danger radius from the mob's center = EffectRange + HitboxRadius.
-        // Ground-targeted AoEs use EffectRange from the target point — no adjustment needed.
-        // TODO: CustomOmenSpawner should apply the same adjustment when sizing VFX omens.
-        if (!cast.IsGroundTargeted && cast.CasterHitboxRadius > 0f)
+        // Radius override — two strategies, checked in order:
+        //
+        // 1. Native omen (hook-tracked, IndicatorType="NATIVE"): a6 from CreateOmen is the
+        //    authoritative outer radius and already includes the caster's hitbox. Use it directly.
+        //    Do NOT add CasterHitboxRadius again.
+        //
+        // 2. Custom/Phase-2 omen (BMR or Lumina fallback): EffectRange is measured from the
+        //    edge of the caster's hitbox, so add CasterHitboxRadius for caster-centred shapes.
+        if (cast.OmenRadius.HasValue)
+        {
+            float r     = cast.OmenRadius.Value;
+            shape.Radius = r;
+            shape.Range  = r;
+            // InnerRadius is not available from a6 — keep as-parsed (0 = no safe zone for CT10)
+        }
+        else if (!cast.IsGroundTargeted && cast.CasterHitboxRadius > 0f)
         {
             float hb = cast.CasterHitboxRadius;
             shape.Radius      += hb;
@@ -511,7 +605,13 @@ public class WorldOverlay
                 // XAxisModifier for cones is typically the total angle in degrees
                 HalfAngle = (xAxis > 0f ? xAxis * 0.5f : 45f) * MathF.PI / 180f,
             },
-            // 2 = Circle, 5 = Ring/Donut (inner radius unknown from CastType alone → treat as circle)
+            10 => new ShapeParams // Donut — inner radius not available from Lumina alone
+            {                      // InnerRadius = 0 means "safe zone unknown; treat as full circle"
+                Shape       = HitShape.Donut,
+                Radius      = range,
+                InnerRadius = 0f,
+            },
+            // 2 = Circle, 5 = proximity/ring (inner radius unknown from CastType alone → circle)
             // Everything else falls through to circle approximation
             _ => new ShapeParams { Shape = HitShape.Circle, Radius = range },
         };

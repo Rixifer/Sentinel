@@ -36,16 +36,16 @@ public class CastScanner
     // Hook-tracked omens: keyed by VfxData* (unique per omen — avoids multi-target collisions)
     private readonly Dictionary<nint, HookTrackedOmen> _hookOmens = new();
 
-    // Per-frame entity maps — rebuilt each Scan() call
-    private readonly Dictionary<ulong, IGameObject> _entityMap  = new();
-    private readonly Dictionary<nint,  IGameObject> _addressMap = new();
+    // Per-frame entity map — rebuilt each Scan() call
+    private readonly Dictionary<ulong, IGameObject> _entityMap = new();
 
     /// <summary>Tracks a native game omen captured by CreateOmenDetour.</summary>
     public struct HookTrackedOmen
     {
-        public nint VfxDataPtr;    // VfxData* — the omen's game object (dictionary key)
-        public nint EntityAddress; // entity it's attached to (for cast bar lookup)
-        public long CreationTicks;
+        public nint  VfxDataPtr;    // VfxData* — the omen's game object (dictionary key)
+        public nint  EntityAddress; // entity it's attached to (for cast bar lookup)
+        public long  CreationTicks;
+        public float OmenRadius;    // a6 from CreateOmen — authoritative outer radius
     }
 
     // ── Debug-facing properties ────────────────────────────────────────────
@@ -138,7 +138,8 @@ public class CastScanner
                     DetectionSource:      "NET",
                     IndicatorType:        "NONE",
                     ShapeInfo:            "",
-                    CasterHitboxRadius:   obj.HitboxRadius);
+                    CasterHitboxRadius:   obj.HitboxRadius,
+                    OmenRadius:           null);
 
                 if (isNew)
                 {
@@ -159,7 +160,14 @@ public class CastScanner
                 // Only log RESOLVE for enemy entities (0x4000xxxx range) — skip player spam
                 if ((ev.EntityId & 0xFF000000) == 0x40000000)
                     DebugLog.Add("RESOLVE", $"Action {ev.ActionId} from 0x{ev.EntityId:X}");
-                _active.Remove(ev.EntityId);
+
+                // Don't remove immediately — force progress to 1.0 and let the omen
+                // keep rendering at the end color until the game destroys the VFX.
+                // Without this, the server resolves early and the gradient never reaches the end.
+                if (_active.TryGetValue(ev.EntityId, out var resolved))
+                    _active[ev.EntityId] = resolved with { Progress = 1.0f, ResolvedTicks = Environment.TickCount64 };
+                else
+                    _active.Remove(ev.EntityId);
             }
 
             while (_netListener.CastCancels.TryDequeue(out var ev))
@@ -180,6 +188,7 @@ public class CastScanner
                 VfxDataPtr    = hookEv.VfxDataPtr,
                 EntityAddress = hookEv.EntityAddress,
                 CreationTicks = hookEv.CreationTicks,
+                OmenRadius    = hookEv.OmenRadius,
             });
             if (added)
                 DebugLog.Add("HOOK-OMEN",
@@ -207,6 +216,19 @@ public class CastScanner
                 if (obj is not IBattleChara bchara) continue;
 
                 var cast = kvp.Value;
+
+                // Resolved casts: keep at progress=1.0 for up to 2 seconds so the cast bar
+                // shows full completion. Color was set at spawn, nothing to update per-frame.
+                if (cast.ResolvedTicks > 0)
+                {
+                    float sinceDeath = (Environment.TickCount64 - cast.ResolvedTicks) / 1000f;
+                    if (sinceDeath > 2.0f)
+                        continue; // will be cleaned up by toRemove (still in set)
+
+                    toRemove.Remove(entityId);
+                    _result.Add(cast);
+                    continue;
+                }
 
                 float elapsed  = (Environment.TickCount64 - cast.StartTimeTicks) / 1000f;
                 float progress = Math.Clamp(elapsed / cast.TotalCastTime, 0f, 1f);
@@ -251,8 +273,9 @@ public class CastScanner
                 if (excludeFromCustom)
                     indicatorType = "EXCLUDED";
 
-                // Phase 1: Recolor native game omen
-                bool hasOmen = false;
+                // Phase 1: Detect native game omen (VfxContainer read for HasOmen + hook radius)
+                bool  hasOmen          = false;
+                float omenRadiusFromHook = 0f; // captured from HookTrackedOmen.OmenRadius (a6)
                 unsafe
                 {
                     nint addr       = obj.Address;
@@ -262,17 +285,23 @@ public class CastScanner
                         nint instancePtr = *(nint*)((byte*)vfxDataPtr + 0x1B8);
                         if (instancePtr != nint.Zero)
                         {
-                            _omenManager.RecolorInstance(instancePtr, progress);
                             hasOmen      = true;
                             indicatorType = "NATIVE";
                             // Remove ALL hook entries for this entity — Step 3 won't double-process them.
-                            // Must collect keys first since we can't Remove inside a foreach.
+                            // Capture OmenRadius (a6) from the first matching hook entry while we can.
+                            float hookRadius = 0f;
                             var toRemoveFromHook = new List<nint>();
                             foreach (var kv in _hookOmens)
+                            {
                                 if (kv.Value.EntityAddress == obj.Address)
+                                {
                                     toRemoveFromHook.Add(kv.Key);
+                                    if (hookRadius == 0f) hookRadius = kv.Value.OmenRadius;
+                                }
+                            }
                             foreach (var hookKey in toRemoveFromHook)
                                 _hookOmens.Remove(hookKey);
+                            omenRadiusFromHook = hookRadius;
                         }
                     }
                 }
@@ -309,7 +338,7 @@ public class CastScanner
                         _customSpawner.SpawnOrUpdate(
                             entityId, actionId, bmrShape,
                             origin, castHeading, obj.HitboxRadius,
-                            isGroundTargeted, progress);
+                            isGroundTargeted);
 
                         hasOmen       = true;
                         indicatorType = "CUSTOM:BMR";
@@ -322,7 +351,7 @@ public class CastScanner
                         if (shapeDef != null)
                         {
                             _customSpawner.SpawnOrUpdateFromShape(
-                                entityId, actionId, shapeDef.Value, origin, progress);
+                                entityId, actionId, shapeDef.Value, origin);
                             hasOmen       = true;
                             indicatorType = "CUSTOM:LUM";
                             shapeInfo     = FormatShapeDef(shapeDef.Value);
@@ -332,12 +361,16 @@ public class CastScanner
 
                 _active[entityId] = cast with
                 {
-                    Progress            = progress,
-                    HasOmen             = hasOmen,
-                    CasterPosition      = obj.Position,
-                    IndicatorType       = indicatorType,
-                    ShapeInfo           = shapeInfo,
-                    CasterHitboxRadius  = obj.HitboxRadius,
+                    Progress           = progress,
+                    HasOmen            = hasOmen,
+                    CasterPosition     = obj.Position,
+                    IndicatorType      = indicatorType,
+                    ShapeInfo          = shapeInfo,
+                    CasterHitboxRadius = obj.HitboxRadius,
+                    // Populate OmenRadius from hook data for native omens (a6 = authoritative radius).
+                    // Null for custom Phase-2 omens — WorldOverlay uses Lumina + hitbox there.
+                    OmenRadius         = indicatorType == "NATIVE" && omenRadiusFromHook > 0f
+                                            ? omenRadiusFromHook : (float?)null,
                 };
             }
 
@@ -351,27 +384,16 @@ public class CastScanner
             LastScanEntityCount = 0;
         }
 
-        // ── Step 3: Recolor hook-tracked omens not handled by Step 2 ─────
-        // These are omens from helper entities or EventObj with no matching network cast.
-        // Keyed by VfxData* — each omen tracked independently regardless of source entity.
-        //
-        // Liveness check: read Instance directly from VfxData*+0x1B8. The game sets
-        // Instance to null before freeing VfxData, so a null Instance means the omen
-        // has been destroyed. No entity lookup required — a2 from CreateOmenDetour does
-        // not reliably match IGameObject.Address in the ObjectTable.
+        // ── Step 3: Expire hook-tracked omens not handled by Step 2 ─────────
+        // Color was written at spawn in CreateOmenDetour — nothing to update per-frame.
+        // Just check liveness: Instance==null means the game destroyed the omen.
         if (_hookOmens.Count > 0)
         {
-            if (_addressMap.Count == 0) BuildEntityMaps();
-
             var hookToRemove = new List<nint>();
 
             foreach (var kvp in _hookOmens)
             {
                 nint vfxDataPtr = kvp.Key;
-                var  hookOmen   = kvp.Value;
-
-                // Read Instance pointer directly from VfxData*+0x1B8.
-                // If null, the game has destroyed the omen — remove from tracking.
                 nint instancePtr;
                 unsafe { instancePtr = *(nint*)((byte*)vfxDataPtr + 0x1B8); }
 
@@ -379,16 +401,7 @@ public class CastScanner
                 {
                     DebugLog.Add("HOOK-REMOVE", $"VfxData=0x{vfxDataPtr:X} — Instance null (omen destroyed)");
                     hookToRemove.Add(vfxDataPtr);
-                    continue;
                 }
-
-                // Try to find the entity for cast bar progress timing (nice-to-have).
-                // a2 may not match ObjectTable addresses, so obj may be null — that's fine,
-                // ComputeHookOmenProgress falls back to elapsed-time Strategy C.
-                _addressMap.TryGetValue(hookOmen.EntityAddress, out var obj);
-
-                float progress = ComputeHookOmenProgress(obj, hookOmen);
-                _omenManager.RecolorInstance(instancePtr, progress);
             }
 
             foreach (var key in hookToRemove)
@@ -403,26 +416,6 @@ public class CastScanner
         return _result;
     }
 
-    private float ComputeHookOmenProgress(IGameObject? obj, HookTrackedOmen hookOmen)
-    {
-        const float DefaultDuration = 5f;
-
-        // Strategy A: entity has a cast bar — use managed cast timing
-        if (obj is IBattleChara bchara && bchara.IsCasting && bchara.TotalCastTime > 0)
-            return Math.Clamp(bchara.CurrentCastTime / bchara.TotalCastTime, 0f, 1f);
-
-        // Strategy B: entity is in _active from network events — use packet timing
-        if (obj != null && _active.TryGetValue(obj.GameObjectId, out var netCast) && netCast.TotalCastTime > 0)
-        {
-            float elapsed = (Environment.TickCount64 - netCast.StartTimeTicks) / 1000f;
-            return Math.Clamp(elapsed / netCast.TotalCastTime, 0f, 1f);
-        }
-
-        // Strategy C: use time since hook fired / default duration
-        float elapsedSinceHook = (Environment.TickCount64 - hookOmen.CreationTicks) / 1000f;
-        return Math.Clamp(elapsedSinceHook / DefaultDuration, 0f, 1f);
-    }
-
     // ── Helpers ───────────────────────────────────────────────────────────
 
     /// <summary>
@@ -432,21 +425,11 @@ public class CastScanner
     private void BuildEntityMaps()
     {
         _entityMap.Clear();
-        _addressMap.Clear();
         foreach (var obj in _objectTable)
         {
             if (obj.GameObjectId != 0)
                 _entityMap[obj.GameObjectId] = obj;
-            if (obj.Address != nint.Zero)
-                _addressMap[obj.Address] = obj;
         }
-    }
-
-    // Kept for compatibility with network event code that called BuildEntityMap()
-    private Dictionary<ulong, IGameObject> BuildEntityMap()
-    {
-        BuildEntityMaps();
-        return _entityMap;
     }
 
     private static bool IsTrackedObject(IGameObject obj)

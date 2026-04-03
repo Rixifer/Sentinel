@@ -9,8 +9,7 @@ namespace Sentinel.Core;
 
 public class AoEResolver
 {
-    private const float DefaultConeHalfAngle  = MathF.PI / 4f; // 45 deg half = 90 deg total
-    private const float DefaultDonutInnerRatio = 0.5f;
+    private const float DefaultConeHalfAngle = MathF.PI / 4f; // 45 deg half = 90 deg total
 
     private readonly IDataManager _dataManager;
     private readonly Dictionary<uint, ShapeDefinition?> _cache = new();
@@ -132,9 +131,14 @@ public class AoEResolver
 
             case 10: // donut (caster-centred)
             {
-                float inner = range * DefaultDonutInnerRatio;
+                float inner = 0f;
                 if (Overrides.Table.TryGetValue(actionId, out var dov) && dov.InnerRadius.HasValue)
                     inner = dov.InnerRadius.Value;
+                else
+                    Plugin.Log.Warning(
+                        "[Sentinel] Donut action {Id} ({Name}) has no inner radius data — " +
+                        "displaying as full circle until data is added",
+                        actionId, action.Name.ToString());
                 return new ShapeDefinition(ShapeType.Donut, default, 0f,
                     Radius: range, InnerRadius: inner, Range: 0f, HalfWidth: 0f, HalfAngle: 0f,
                     Unavoidable: false, IsGroundTargeted: isGroundTargeted, CastType: castType,

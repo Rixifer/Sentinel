@@ -11,9 +11,10 @@ namespace Sentinel.Core;
 /// <summary>Fired by CreateOmenDetour for each enemy omen spawned by the game.</summary>
 public struct HookOmenEvent
 {
-    public nint VfxDataPtr;    // the VfxData* returned by CreateOmen (unique per omen)
-    public nint EntityAddress; // a2 parameter — the entity the omen is attached to
-    public long CreationTicks; // Environment.TickCount64 at hook time
+    public nint  VfxDataPtr;    // the VfxData* returned by CreateOmen (unique per omen)
+    public nint  EntityAddress; // a2 parameter — the entity the omen is attached to
+    public long  CreationTicks; // Environment.TickCount64 at hook time
+    public float OmenRadius;    // a6 parameter — authoritative outer radius (already includes hitbox)
 }
 
 public unsafe class OmenManager : IDisposable
@@ -62,59 +63,14 @@ public unsafe class OmenManager : IDisposable
 
     /// <summary>
     /// Resets per-frame stats. Called at the start of each CastScanner.Scan().
+    /// LastRecolorCount now tracks omens colored at spawn (incremented in CreateOmenDetour).
     /// </summary>
     public void ResetFrameStats()
     {
         LastRecolorCount = 0;
     }
 
-    /// <summary>
-    /// Recolors a single VFX instance. Called from inside CastScanner's ObjectTable iteration
-    /// where the entity and its VFX are guaranteed live. instancePtr must be non-null.
-    /// </summary>
-    public void RecolorInstance(nint instancePtr, float progress)
-    {
-        if (!_config.Enabled) return;
-
-        var color = ComputeProgressColor(progress);
-
-        // Use the game's color update function to propagate our color to all emitters.
-        // Note: this tints on top of the omen's inherent particle colors, so non-orange
-        // presets may show some color mixing with the base orange. The default orange→red
-        // preset works cleanly.
-        if (VfxFunctions.UpdateVfxColor != null)
-            VfxFunctions.UpdateVfxColor(instancePtr, color.X, color.Y, color.Z, color.W);
-        else
-            *(Vector4*)((byte*)instancePtr + 0xA0) = color;
-
-        LastRecolorCount++;
-    }
-
-    public Vector4 ComputeProgressColor(float progress)
-    {
-        var s = _config.ColorStart;
-        var e = _config.ColorEnd;
-        float r = s.X + (e.X - s.X) * progress;
-        float g = s.Y + (e.Y - s.Y) * progress;
-        float b = s.Z + (e.Z - s.Z) * progress;
-
-        // Alpha ramps from 70% to 100% of configured opacity over cast duration.
-        float baseAlpha   = _config.OmenOpacity;
-        float linearAlpha = baseAlpha * (0.7f + 0.3f * progress);
-        float vfxAlpha    = LinearToVfxAlpha(linearAlpha);
-
-        return new Vector4(r, g, b, vfxAlpha);
-    }
-
-    private static float LinearToVfxAlpha(float a)
-    {
-        const float threshold = 0.31372549019f; // 80/255
-        return a <= threshold
-            ? a * 3.1875f
-            : 1f + (a - threshold) * 1.96f;
-    }
-
-    // ── CreateOmen Hook (light wall remap + initial color write) ─────────────
+    // ── CreateOmen Hook (light wall remap + spawn-time color write) ───────────
 
     private VfxOmenData* CreateOmenDetour(
         uint a1, nint a2, nint a3, float a4,
@@ -146,25 +102,36 @@ public unsafe class OmenManager : IDisposable
 
         if (isEnemy == 1 && vfx != null)
         {
-            // Write initial color at creation time — direct write works here because
-            // the engine has not yet snapshotted the emitter state.
+            // Write configured color once at creation time — direct 0xA0 write bypasses
+            // UpdateVfxColor's tinting pipeline, so all colors (including blue) work correctly.
             try
             {
                 var instance = vfx->Instance;
                 if (instance != null)
-                    instance->Color = Vector4.One; // Reset to white — UpdateVfxColor handles all coloring
+                {
+                    var color = _config.OmenColor;
+                    // Apply opacity to alpha channel
+                    color = new Vector4(color.X, color.Y, color.Z, color.W * _config.OmenOpacity);
+                    // HDR glow: RGB multiply pushes into bloom range
+                    float glow = _config.GlowIntensity;
+                    if (glow != 1.0f)
+                        color = new Vector4(color.X * glow, color.Y * glow, color.Z * glow, color.W);
+                    instance->Color = color;
+                    LastRecolorCount++;
+                }
             }
             catch (Exception ex)
             {
-                Plugin.Log.Error("[Sentinel] CreateOmen initial color write failed: {Msg}", ex.Message);
+                Plugin.Log.Error("[Sentinel] CreateOmen color write failed: {Msg}", ex.Message);
             }
 
-            // Queue for per-frame gradient tracking via CastScanner's hook-omen loop
+            // Queue for cast bar tracking and OmenRadius capture
             OmenSpawnEvents.Enqueue(new HookOmenEvent
             {
                 VfxDataPtr    = (nint)vfx,
                 EntityAddress = a2,
                 CreationTicks = Environment.TickCount64,
+                OmenRadius    = a6,
             });
             DebugLog.Add("HOOK-OMEN",
                 $"VfxData=0x{((nint)vfx):X} entity=0x{a2:X} omenId={a1}");

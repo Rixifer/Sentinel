@@ -12,17 +12,29 @@ public enum OmenStyle
 
 public class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 12;
+    public int Version { get; set; } = 14;
 
     // Master switch
     public bool Enabled = true;
 
-    // Colors — lerps from Start to End over cast duration (applied to native omens)
-    public Vector4 ColorStart = new(0.996f, 0.961f, 0.471f, 1.0f);  // warm yellow
-    public Vector4 ColorEnd   = new(0.996f, 0.235f, 0.235f, 1.0f);  // red
+    // Single omen color — written once at VFX spawn time via direct 0xA0 write.
+    // Bypasses UpdateVfxColor tinting, so all colors (including blue) work correctly.
+    public Vector4 OmenColor = new(1.0f, 0.545f, 0.239f, 1.0f);  // warm orange
 
-    // Opacity of the omen color tint (0.0 = invisible, 1.0 = full color)
-    public float OmenOpacity = 0.5f;
+    // Opacity applied to OmenColor.W at spawn time (0.0 = invisible, 1.0 = full)
+    public float OmenOpacity = 0.50f;
+
+    // HDR glow — multiplies RGB at spawn-time write to push into bloom range
+    public float GlowIntensity = 1.20f;
+
+    // Cast bar overlay — world-projected bar at the AoE center
+    public bool    ShowCastBar      = true;
+    public Vector4 CastBarFillColor = new(1.0f, 0.976f, 0.365f, 1.0f);  // yellow
+    public Vector4 CastBarBgColor   = new(0.0f, 0.0f, 0.0f, 0.7f);
+    public float   CastBarWidth     = 120f;
+    public float   CastBarHeight    = 10f;
+    public bool    ShowCastBarTime  = false;
+    public bool    ShowCastBarName  = false;
 
     // AoE indicator visual style
     public OmenStyle IndicatorStyle = OmenStyle.Default;
@@ -56,13 +68,19 @@ public class Configuration : IPluginConfiguration
     public Vector4 HitboxRingColor2     = new(1f, 0.8f, 0.4f, 0.4f);
     public float   HitboxRingThickness2 = 1.5f;
 
-    // Action name floating labels (above AoE indicators)
+    // Custom range Ring 3
+    public bool    ShowHitboxRing3      = false;
+    public float   HitboxRingRadius3    = 25f;
+    public Vector4 HitboxRingColor3     = new(0.8f, 0.4f, 1f, 0.4f);
+    public float   HitboxRingThickness3 = 1.5f;
+
+    // Action name floating labels (above AoE indicators / cast bar)
     public bool    ShowActionNames  = false;
     public Vector4 ActionNameColor  = new(1f, 1f, 1f, 1f);
 
     // Danger warning when player stands inside an active AoE
     public bool    ShowHitWarning   = true;
-    public Vector4 HitWarningColor  = new(1f, 0.2f, 0.2f, 1f);
+    public Vector4 HitWarningColor  = new(0.988f, 1.0f, 0.200f, 1.0f);
     public float   HitWarningSize   = 36f;     // pixel size of the warning text
 
     // Action name floating labels — size

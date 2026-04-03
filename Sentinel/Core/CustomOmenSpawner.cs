@@ -11,14 +11,22 @@ namespace Sentinel.Core;
 public class CustomOmenSpawner
 {
     private readonly OmenVfxTracker _tracker;
-    private readonly OmenManager    _omenManager;
     private readonly Configuration  _config;
 
     public CustomOmenSpawner(OmenVfxTracker tracker, OmenManager omenManager, Configuration config)
     {
-        _tracker     = tracker;
-        _omenManager = omenManager;
-        _config      = config;
+        _tracker = tracker;
+        _config  = config;
+    }
+
+    private Vector4 GetStaticOmenColor()
+    {
+        var color = _config.OmenColor;
+        color = new Vector4(color.X, color.Y, color.Z, color.W * _config.OmenOpacity);
+        float glow = _config.GlowIntensity;
+        if (glow != 1.0f)
+            color = new Vector4(color.X * glow, color.Y * glow, color.Z * glow, color.W);
+        return color;
     }
 
     /// <summary>
@@ -31,11 +39,10 @@ public class CustomOmenSpawner
     /// <param name="heading">Cast direction in radians.</param>
     /// <param name="hitboxRadius">Caster hitbox radius — added to caster-centered circles.</param>
     /// <param name="isGroundTargeted">True if the AoE is placed at a target location.</param>
-    /// <param name="progress">Cast progress 0..1 — drives color gradient.</param>
     public void SpawnOrUpdate(
         ulong entityId, uint actionId, BmrShapeEntry shape,
         Vector3 position, float heading, float hitboxRadius,
-        bool isGroundTargeted, float progress)
+        bool isGroundTargeted)
     {
         var shapeDef = ConvertToShapeDefinition(shape, position, heading, hitboxRadius, isGroundTargeted);
         if (shapeDef == null) return;
@@ -44,7 +51,7 @@ public class CustomOmenSpawner
         if (resolved == null) return;
 
         var (avfxPath, size, rotation) = resolved.Value;
-        var color = _omenManager.ComputeProgressColor(progress);
+        var color = GetStaticOmenColor();
 
         string key = $"{entityId}##{actionId}";
 
@@ -76,16 +83,15 @@ public class CustomOmenSpawner
     /// <param name="actionId">Action being cast.</param>
     /// <param name="shape">Pre-built ShapeDefinition from AoEResolver.</param>
     /// <param name="position">World-space AoE origin.</param>
-    /// <param name="progress">Cast progress 0..1 — drives color gradient.</param>
     public void SpawnOrUpdateFromShape(
         ulong entityId, uint actionId, ShapeDefinition shape,
-        Vector3 position, float progress)
+        Vector3 position)
     {
         var resolved = OmenPathDecoder.ResolveOmenVfx(shape);
         if (resolved == null) return;
 
         var (avfxPath, size, rotation) = resolved.Value;
-        var color = _omenManager.ComputeProgressColor(progress);
+        var color = GetStaticOmenColor();
 
         string key = $"{entityId}##{actionId}";
 
