@@ -52,5 +52,7 @@ public record struct ActiveCast(
     // ── Debug metadata ────────────────────────────────────────────────────
     string  DetectionSource,   // "NET" = ActorCast network packet
     string  IndicatorType,     // "NATIVE", "CUSTOM:BMR", "CUSTOM:LUM", "NONE"
-    string  ShapeInfo          // "" for native; "Circle(8.0)" etc. for custom
+    string  ShapeInfo,         // "" for native; "Circle(8.0)" etc. for custom
+    // ── Caster geometry ───────────────────────────────────────────────────
+    float   CasterHitboxRadius // IGameObject.HitboxRadius — for non-ground-targeted radius adjustment
 );

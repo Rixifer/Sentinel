@@ -1,8 +1,13 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Interface.ManagedFontAtlas;
+using Dalamud.Interface.Textures;
+using Dalamud.Plugin.Services;
 using Sentinel.Core;
 using System;
+using System.Collections.Generic;
 using System.Numerics;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Sentinel.UI;
@@ -16,10 +21,40 @@ public class WorldOverlay
 {
     private readonly Plugin _plugin;
     private Configuration Config => _plugin.Config;
+    private readonly IDataManager _dataManager;
+    private readonly IFontHandle? _axisFont;
+    private readonly Dictionary<uint, float> _effectRangeCache = new();
+    private readonly Dictionary<uint, float> _xAxisCache       = new();
+
+    // Dedup set: prevents spamming HIT-DETECT logs for the same cast every frame.
+    // Keys are "entityId##actionId". Entries are removed when the cast ends.
+    private readonly HashSet<string> _loggedHits = new();
+
+    // State-change tracking for ENTERED/EXITED diagnostics
+    private bool _wasInsideAoE = false;
+
+    // FFXIV UI warning icon (orange "!" — icon 60073).
+    // If this ID doesn't yield a useful texture the code falls back to scaled ImGui text.
+    private const uint WarningIconId = 60073u;
+
+    // ── Shape types used internally for hit tests ─────────────────────────
+    private enum HitShape { Circle, Cone, Rect, Donut }
+
+    private struct ShapeParams
+    {
+        public HitShape Shape;
+        public float Radius;      // Circle/Donut outer radius; used as display radius
+        public float InnerRadius; // Donut only
+        public float HalfAngle;   // Cone: half-angle in radians
+        public float HalfWidth;   // Rect: half-width in yalms
+        public float Range;       // Cone/Rect forward length in yalms
+    }
 
     public WorldOverlay(Plugin plugin)
     {
-        _plugin = plugin;
+        _plugin      = plugin;
+        _dataManager = Plugin.DataManager;
+        _axisFont    = plugin.AxisFont;
     }
 
     public void Draw()
@@ -84,8 +119,8 @@ public class WorldOverlay
     private void DrawWorldRing(ImDrawListPtr drawList, Vector3 center,
         float radius, Vector4 color, float thickness)
     {
-        const int segments   = 64;
-        uint      col        = ImGui.ColorConvertFloat4ToU32(color);
+        const int segments    = 64;
+        uint      col         = ImGui.ColorConvertFloat4ToU32(color);
         bool      prevVisible = false;
 
         for (int i = 0; i <= segments; i++)
@@ -121,34 +156,46 @@ public class WorldOverlay
         => Plugin.Condition[ConditionFlag.InCombat];
 
     // ── Feature 2: Action name floating labels ────────────────────────────
+    // TODO: Consider loading TrumpGothic via UiBuilder.FontAtlas.NewGameFontHandle
+    //       for a more FFXIV-native look. Currently uses the default ImGui font scaled
+    //       to Config.ActionNameSize. Async font compilation makes this non-trivial.
 
     private void DrawActionNames(ImDrawListPtr drawList)
     {
         var casts = _plugin._lastCasts;
         if (casts == null) return;
 
-        foreach (var cast in casts)
+        // Push the FFXIV Axis font for crisp rendering — scaling DOWN from 36px native stays sharp.
+        // If AxisFont is null (load failed), _axisFont?.Push() returns null and using(null) is a no-op,
+        // so ImGui.GetFont() falls back to the default font (blurry when scaled up, but functional).
+        using (_axisFont?.Push())
         {
-            if (!cast.HasOmen) continue;
-            if (string.IsNullOrEmpty(cast.ActionName)) continue;
+            var   font      = ImGui.GetFont(); // returns Axis font if pushed, default otherwise
+            float fontSize  = Config.ActionNameSize;
 
-            var worldPos = cast.IsGroundTargeted && cast.TargetPosition != Vector3.Zero
-                ? cast.TargetPosition
-                : cast.CasterPosition;
-            worldPos.Y += 1.5f; // float above ground plane
+            foreach (var cast in casts)
+            {
+                if (!cast.HasOmen) continue;
+                if (string.IsNullOrEmpty(cast.ActionName)) continue;
 
-            if (!Plugin.GameGui.WorldToScreen(worldPos, out var screenPos)) continue;
+                var worldPos = cast.IsGroundTargeted && cast.TargetPosition != Vector3.Zero
+                    ? cast.TargetPosition
+                    : cast.CasterPosition;
+                worldPos.Y += 1.5f; // float above ground plane
 
-            string text      = cast.ActionName;
-            var    textSize  = ImGui.CalcTextSize(text);
-            var    textPos   = new Vector2(screenPos.X - textSize.X * 0.5f,
-                                           screenPos.Y - textSize.Y * 0.5f);
+                if (!Plugin.GameGui.WorldToScreen(worldPos, out var screenPos)) continue;
 
-            uint shadowColor = ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, 0.8f));
-            uint textColor   = ImGui.ColorConvertFloat4ToU32(Config.ActionNameColor);
+                string text     = cast.ActionName;
+                var    textSize = ImGui.CalcTextSizeA(font, fontSize, float.MaxValue, 0f, text, out _);
+                var    textPos  = new Vector2(screenPos.X - textSize.X * 0.5f,
+                                              screenPos.Y - textSize.Y * 0.5f);
 
-            drawList.AddText(textPos + new Vector2(1f, 1f), shadowColor, text);
-            drawList.AddText(textPos, textColor, text);
+                uint shadowColor = ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, 0.8f));
+                uint textColor   = ImGui.ColorConvertFloat4ToU32(Config.ActionNameColor);
+
+                drawList.AddText(font, fontSize, textPos + new Vector2(1f, 1f), shadowColor, text, 0f);
+                drawList.AddText(font, fontSize, textPos, textColor, text, 0f);
+            }
         }
     }
 
@@ -162,69 +209,356 @@ public class WorldOverlay
 
         var playerPos2D = new Vector2(player.Position.X, player.Position.Z);
 
+        // Build the set of cast keys that hit the player this frame, and count omen-bearing casts
+        var currentHitKeys = new HashSet<string>();
+        bool anyHit        = false;
+        int  castsWithOmen = 0;
+
         foreach (var cast in casts)
         {
             if (!cast.HasOmen) continue;
+            castsWithOmen++;
 
-            var aoeCenter = cast.IsGroundTargeted && cast.TargetPosition != Vector3.Zero
+            if (!IsPlayerHitByCast(playerPos2D, cast,
+                    out var shapeName, out float radius, out float dist))
+                continue;
+
+            anyHit = true;
+            string hitKey = $"{cast.EntityId}##{cast.ActionId}";
+            currentHitKeys.Add(hitKey);
+
+            // Log once per cast (not every frame)
+            if (_loggedHits.Add(hitKey))
+                DebugLog.Add("HIT-DETECT",
+                    $"HIT: Action {cast.ActionId} \"{cast.ActionName}\" — " +
+                    $"shape={shapeName}, radius={radius:F1}y, dist={dist:F1}y");
+        }
+
+        // Expire log entries whose casts are no longer active
+        _loggedHits.IntersectWith(currentHitKeys);
+
+        // ── State-change diagnostics (log only on transitions) ────────────
+        if (anyHit && !_wasInsideAoE)
+        {
+            DebugLog.Add("HIT-DETECT",
+                $"ENTERED — player=({playerPos2D.X:F1},{playerPos2D.Y:F1})");
+            _wasInsideAoE = true;
+        }
+        else if (!anyHit && _wasInsideAoE)
+        {
+            // Dump why we stopped detecting — critical for diagnosing false disappearances
+            var sb = new StringBuilder();
+            sb.Append($"EXITED — player=({playerPos2D.X:F1},{playerPos2D.Y:F1}), ");
+            sb.Append($"totalCasts={casts.Count}, withOmen={castsWithOmen}");
+
+            foreach (var cast in casts)
+            {
+                if (!cast.HasOmen) continue;
+                var origin   = cast.IsGroundTargeted && cast.TargetPosition != Vector3.Zero
+                    ? cast.TargetPosition : cast.CasterPosition;
+                var origin2D = new Vector2(origin.X, origin.Z);
+                float dist   = Vector2.Distance(playerPos2D, origin2D);
+                sb.Append($" | {cast.ActionId}@({origin2D.X:F1},{origin2D.Y:F1}) d={dist:F1}");
+            }
+
+            DebugLog.Add("HIT-DETECT", sb.ToString());
+            _wasInsideAoE = false;
+        }
+
+        if (!anyHit) return;
+
+        // ── Draw warning icon above the PLAYER'S head ─────────────────────
+        // Always above the player (never over the AoE) so it's always visible.
+        var warningWorldPos = player.Position;
+        warningWorldPos.Y += 2.5f;
+
+        if (!Plugin.GameGui.WorldToScreen(warningWorldPos, out var screenPos)) return;
+
+        float iconSize = Config.HitWarningSize;
+        uint  tintCol  = ImGui.ColorConvertFloat4ToU32(Config.HitWarningColor);
+
+        // Attempt to render a game icon texture; fall back to scaled text if unavailable
+        var lookup = new GameIconLookup(WarningIconId);
+        var tex    = Plugin.TextureProvider.GetFromGameIcon(in lookup).GetWrapOrDefault();
+
+        if (tex != null)
+        {
+            var topLeft     = new Vector2(screenPos.X - iconSize * 0.5f, screenPos.Y - iconSize);
+            var bottomRight = new Vector2(screenPos.X + iconSize * 0.5f, screenPos.Y);
+            drawList.AddImage(tex.Handle, topLeft, bottomRight, Vector2.Zero, Vector2.One, tintCol);
+        }
+        else
+        {
+            // Text fallback — single "!" at configured size, using Axis font for crisp rendering
+            const string warning = "!";
+            using (_axisFont?.Push())
+            {
+                var font     = ImGui.GetFont();
+                var textSize = ImGui.CalcTextSizeA(font, iconSize, float.MaxValue, 0f, warning, out _);
+                var basePos  = new Vector2(screenPos.X - textSize.X * 0.5f,
+                                           screenPos.Y - textSize.Y);
+
+                uint shadowCol = ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, 0.9f));
+                drawList.AddText(font, iconSize, basePos + new Vector2(2f, 2f), shadowCol, warning, 0f);
+                drawList.AddText(font, iconSize, basePos, tintCol, warning, 0f);
+            }
+        }
+    }
+
+    // ── Per-shape hit tests ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Tests whether the player (2D XZ position) is inside the AoE described by <paramref name="cast"/>.
+    /// Shape is determined from ShapeInfo (custom omens) or Lumina CastType (native omens).
+    /// </summary>
+    private bool IsPlayerHitByCast(Vector2 playerPos, ActiveCast cast,
+        out string shapeName, out float radius, out float dist)
+    {
+        shapeName = "Unknown";
+        radius    = 0f;
+        dist      = 0f;
+
+        // Determine shape from ShapeInfo string first, then Lumina CastType fallback
+        if (!ParseShapeInfo(cast.ShapeInfo, out var shape))
+            GetShapeFromLumina(cast.CastType, cast.ActionId, out shape);
+
+        // Caster-centered AoEs: EffectRange is measured from the EDGE of the caster's hitbox,
+        // so the actual danger radius from the mob's center = EffectRange + HitboxRadius.
+        // Ground-targeted AoEs use EffectRange from the target point — no adjustment needed.
+        // TODO: CustomOmenSpawner should apply the same adjustment when sizing VFX omens.
+        if (!cast.IsGroundTargeted && cast.CasterHitboxRadius > 0f)
+        {
+            float hb = cast.CasterHitboxRadius;
+            shape.Radius      += hb;
+            shape.Range       += hb;
+            shape.InnerRadius += hb;
+        }
+
+        shapeName = shape.Shape.ToString();
+        radius    = shape.Radius > 0f ? shape.Radius : shape.Range;
+
+        if (radius <= 0f && shape.Range <= 0f) return false;
+
+        // Origin: cones/rects emanate from the caster; circles/donuts use the ground target
+        Vector3 origin3D = (shape.Shape == HitShape.Circle || shape.Shape == HitShape.Donut)
+            && cast.IsGroundTargeted && cast.TargetPosition != Vector3.Zero
                 ? cast.TargetPosition
                 : cast.CasterPosition;
 
-            if (!IsPlayerInsideAoE(playerPos2D, aoeCenter, cast)) continue;
+        var origin2D = new Vector2(origin3D.X, origin3D.Z);
+        dist = Vector2.Distance(playerPos, origin2D);
 
-            var warningWorldPos = aoeCenter;
-            warningWorldPos.Y += 3f; // above the action name label
+        return IsPointInShape(playerPos, origin2D, cast.Heading, shape);
+    }
 
-            if (!Plugin.GameGui.WorldToScreen(warningWorldPos, out var screenPos)) continue;
+    private static bool IsPointInShape(Vector2 point, Vector2 origin,
+        float heading, ShapeParams shape)
+    {
+        switch (shape.Shape)
+        {
+            case HitShape.Circle:
+                return Vector2.Distance(point, origin) <= shape.Radius;
 
-            string warning     = "!";
-            var    textSize    = ImGui.CalcTextSize(warning);
-            var    basePos     = new Vector2(screenPos.X - textSize.X * 0.5f,
-                                             screenPos.Y - textSize.Y);
+            case HitShape.Donut:
+            {
+                float d = Vector2.Distance(point, origin);
+                return d >= shape.InnerRadius && d <= shape.Radius;
+            }
 
-            uint shadowColor  = ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, 0.9f));
-            uint warningColor = ImGui.ColorConvertFloat4ToU32(Config.HitWarningColor);
+            case HitShape.Cone:
+                return IsPointInCone(point, origin, heading, shape.Range, shape.HalfAngle);
 
-            // Shadow
-            drawList.AddText(basePos + new Vector2(2f, 2f), shadowColor, warning);
-            // Bold effect — draw offset copies
-            drawList.AddText(basePos,                         warningColor, warning);
-            drawList.AddText(basePos + new Vector2(1f, 0f),  warningColor, warning);
-            drawList.AddText(basePos + new Vector2(0f, 1f),  warningColor, warning);
+            case HitShape.Rect:
+                return IsPointInRect(point, origin, heading, shape.Range, shape.HalfWidth);
+
+            default:
+                return Vector2.Distance(point, origin) <= shape.Radius;
         }
     }
 
     /// <summary>
-    /// Approximate hit test using a circle approximation for all shape types.
-    /// A circle is a conservative bound — it may trigger for shapes like cones or rects
-    /// where the player is outside the actual hitbox but within the bounding circle.
-    /// Accurate per-shape tests can be added later.
+    /// Cone hit test. heading=0 → facing +Z (south); increases clockwise when viewed from above.
+    /// The cone extends <paramref name="range"/> yalms forward within ±<paramref name="halfAngle"/> radians.
     /// </summary>
-    private static bool IsPlayerInsideAoE(Vector2 playerPos2D, Vector3 aoeCenter, ActiveCast cast)
+    private static bool IsPointInCone(Vector2 point, Vector2 origin,
+        float heading, float range, float halfAngle)
     {
-        var   center2D = new Vector2(aoeCenter.X, aoeCenter.Z);
-        float dist     = Vector2.Distance(playerPos2D, center2D);
-        float radius   = EstimateAoERadius(cast);
-        if (radius <= 0f) return false;
-        return dist <= radius;
+        var   toPoint = point - origin;
+        float d       = toPoint.Length();
+        if (d > range || d < 0.001f) return false;
+
+        // Forward vector from heading: heading=0 → +Z → (0,1) in (X,Z) space
+        var   forward = new Vector2(MathF.Sin(heading), MathF.Cos(heading));
+        float dot     = Vector2.Dot(Vector2.Normalize(toPoint), forward);
+        float angle   = MathF.Acos(Math.Clamp(dot, -1f, 1f));
+        return angle <= halfAngle;
     }
 
     /// <summary>
-    /// Extracts an approximate radius from the cast's ShapeInfo string.
-    /// ShapeInfo formats: "Circle(8.0)", "Cone(12.0, 90°)", "Rect(40.0, 4.0)", "Donut(5.0/10.0)"
-    /// Returns 0 if ShapeInfo is empty (native omens without custom shape data are skipped).
+    /// Rect hit test. The rectangle extends <paramref name="range"/> yalms forward from the
+    /// origin and ±<paramref name="halfWidth"/> yalms laterally.
     /// </summary>
-    private static float EstimateAoERadius(ActiveCast cast)
+    private static bool IsPointInRect(Vector2 point, Vector2 origin,
+        float heading, float range, float halfWidth)
     {
-        if (string.IsNullOrEmpty(cast.ShapeInfo)) return 0f;
+        var toPoint = point - origin;
 
-        // Extract the first numeric value — always the primary radius/range
-        var match = Regex.Match(cast.ShapeInfo, @"[\d.]+");
-        if (match.Success && float.TryParse(match.Value,
-            System.Globalization.NumberStyles.Float,
-            System.Globalization.CultureInfo.InvariantCulture, out float r))
-            return r;
+        // Project into caster-local axes: forward = (sin h, cos h); right = (cos h, -sin h)
+        float fX = MathF.Sin(heading);
+        float fZ = MathF.Cos(heading);
+        float localForward = toPoint.X * fX  + toPoint.Y * fZ;
+        float localRight   = toPoint.X * fZ  - toPoint.Y * fX;
 
-        return 0f;
+        return localForward >= 0f && localForward <= range
+            && MathF.Abs(localRight) <= halfWidth;
+    }
+
+    // ── Shape parsers ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Parses a ShapeInfo string produced by FormatBmrShape / FormatShapeDef.
+    /// Formats: "Circle(r)", "Cone(range, totalAngle°)", "Rect(range × halfWidth)",
+    ///          "Donut(inner/outer)", "Cross(range × halfWidth)", "DonutSec(inner/outer)"
+    /// Returns false if the string is empty or unrecognised.
+    /// </summary>
+    private static bool ParseShapeInfo(string info, out ShapeParams shape)
+    {
+        shape = default;
+        if (string.IsNullOrEmpty(info)) return false;
+
+        float[] nums = ExtractNumbers(info);
+        if (nums.Length == 0) return false;
+
+        if (info.StartsWith("Circle", StringComparison.OrdinalIgnoreCase))
+        {
+            shape = new ShapeParams { Shape = HitShape.Circle, Radius = nums[0] };
+            return true;
+        }
+
+        if (info.StartsWith("Cone", StringComparison.OrdinalIgnoreCase) && nums.Length >= 2)
+        {
+            // nums[1] is the TOTAL cone angle in degrees; halfAngle = total/2 in radians
+            float halfAngle = nums[1] * 0.5f * MathF.PI / 180f;
+            shape = new ShapeParams
+            {
+                Shape     = HitShape.Cone,
+                Range     = nums[0],
+                Radius    = nums[0],
+                HalfAngle = halfAngle,
+            };
+            return true;
+        }
+
+        if (info.StartsWith("Rect", StringComparison.OrdinalIgnoreCase) && nums.Length >= 2)
+        {
+            // nums[1] is half-width (as stored in ShapeDefinition.HalfWidth)
+            shape = new ShapeParams
+            {
+                Shape     = HitShape.Rect,
+                Range     = nums[0],
+                Radius    = nums[0],
+                HalfWidth = nums[1],
+            };
+            return true;
+        }
+
+        if ((info.StartsWith("Donut", StringComparison.OrdinalIgnoreCase)) && nums.Length >= 2)
+        {
+            // "Donut(inner/outer)" or "DonutSec(inner/outer)"
+            shape = new ShapeParams
+            {
+                Shape       = HitShape.Donut,
+                InnerRadius = nums[0],
+                Radius      = nums[1],
+            };
+            return true;
+        }
+
+        if (info.StartsWith("Cross", StringComparison.OrdinalIgnoreCase) && nums.Length >= 1)
+        {
+            // Cross = two overlapping rects; approximate as a circle for hit detection
+            shape = new ShapeParams { Shape = HitShape.Circle, Radius = nums[0] };
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Derives ShapeParams from a native omen's CastType and Lumina Action data.
+    /// Used when ShapeInfo is empty (hook-detected / network-detected native omens).
+    /// </summary>
+    private void GetShapeFromLumina(byte castType, uint actionId, out ShapeParams shape)
+    {
+        float range = GetEffectRange(actionId);
+        float xAxis = GetXAxisModifier(actionId);
+
+        shape = castType switch
+        {
+            3 => new ShapeParams // Rect / line AoE
+            {
+                Shape     = HitShape.Rect,
+                Range     = range,
+                Radius    = range,
+                // XAxisModifier for rects is the full width — store half
+                HalfWidth = xAxis > 0f ? xAxis * 0.5f : 2f,
+            },
+            4 => new ShapeParams // Cone / fan AoE
+            {
+                Shape     = HitShape.Cone,
+                Range     = range,
+                Radius    = range,
+                // XAxisModifier for cones is typically the total angle in degrees
+                HalfAngle = (xAxis > 0f ? xAxis * 0.5f : 45f) * MathF.PI / 180f,
+            },
+            // 2 = Circle, 5 = Ring/Donut (inner radius unknown from CastType alone → treat as circle)
+            // Everything else falls through to circle approximation
+            _ => new ShapeParams { Shape = HitShape.Circle, Radius = range },
+        };
+    }
+
+    // ── Lumina helpers ────────────────────────────────────────────────────
+
+    private float GetEffectRange(uint actionId)
+    {
+        if (_effectRangeCache.TryGetValue(actionId, out var cached))
+            return cached;
+
+        float range = 0f;
+        var sheet = _dataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>();
+        var row   = sheet?.GetRowOrDefault(actionId);
+        if (row.HasValue) range = row.Value.EffectRange;
+
+        _effectRangeCache[actionId] = range;
+        return range;
+    }
+
+    private float GetXAxisModifier(uint actionId)
+    {
+        if (_xAxisCache.TryGetValue(actionId, out var cached))
+            return cached;
+
+        float val = 0f;
+        var sheet = _dataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>();
+        var row   = sheet?.GetRowOrDefault(actionId);
+        if (row.HasValue) val = row.Value.XAxisModifier;
+
+        _xAxisCache[actionId] = val;
+        return val;
+    }
+
+    // ── Utility ───────────────────────────────────────────────────────────
+
+    /// <summary>Extracts all decimal numbers from a string in order.</summary>
+    private static float[] ExtractNumbers(string text)
+    {
+        var matches = Regex.Matches(text, @"\d+(?:\.\d+)?");
+        var result  = new float[matches.Count];
+        for (int i = 0; i < matches.Count; i++)
+            float.TryParse(matches[i].Value,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out result[i]);
+        return result;
     }
 }

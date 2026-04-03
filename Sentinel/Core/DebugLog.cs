@@ -27,6 +27,9 @@ public static class DebugLog
         _entries.Add(new LogEntry { Time = DateTime.Now, Category = category, Message = message });
         if (_entries.Count > MaxEntries)
             _entries.RemoveAt(0);
+
+        // Persist to dalamud.log for remote debugging
+        Plugin.Log.Debug("[Sentinel][{Category}] {Message}", category, message);
     }
 
     public static void Clear() => _entries.Clear();

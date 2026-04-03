@@ -1,4 +1,6 @@
 using Dalamud.Game.Command;
+using Dalamud.Interface.GameFonts;
+using Dalamud.Interface.ManagedFontAtlas;
 using Dalamud.Interface.Windowing;
 using Dalamud.IoC;
 using Dalamud.Plugin;
@@ -6,6 +8,7 @@ using Dalamud.Plugin.Services;
 using Sentinel.Core;
 using Sentinel.Data;
 using Sentinel.UI;
+using System;
 using System.Collections.Generic;
 
 namespace Sentinel;
@@ -23,6 +26,7 @@ public class Plugin : IDalamudPlugin
     [PluginService] internal static IGameInteropProvider   GameInterop      { get; private set; } = null!;
     [PluginService] internal static ISigScanner            SigScanner       { get; private set; } = null!;
     [PluginService] internal static ICondition             Condition        { get; private set; } = null!;
+    [PluginService] internal static ITextureProvider      TextureProvider  { get; private set; } = null!;
 
     private const string CmdMain = "/sentinel";
 
@@ -38,6 +42,10 @@ public class Plugin : IDalamudPlugin
 
     // Kept for potential future use
     internal readonly AoEResolver            _resolver;
+
+    // FFXIV Axis font loaded at 36px native — scales DOWN crisply for action name labels.
+    // null if loading fails (WorldOverlay falls back to the default ImGui font).
+    internal IFontHandle? AxisFont;
 
     private readonly WindowSystem _windowSystem = new("Sentinel");
     private readonly ConfigWindow _configWindow;
@@ -68,6 +76,18 @@ public class Plugin : IDalamudPlugin
         _scanner         = new CastScanner(ObjectTable, DataManager, Config, _omenReader, _omenManager,
                                _customSpawner, _bmrShapes, _netListener, _excludedActions, _resolver);
 
+        // Load FFXIV Axis font at native 36px for crisp overlay text rendering.
+        // Scaling DOWN from native size is crisp; scaling UP causes blur.
+        try
+        {
+            AxisFont = PluginInterface.UiBuilder.FontAtlas.NewGameFontHandle(
+                new GameFontStyle(GameFontFamilyAndSize.TrumpGothic68));
+        }
+        catch (Exception ex)
+        {
+            Log.Warning("[Sentinel] Failed to load Axis font: {Msg}", ex.Message);
+        }
+
         _configWindow = new ConfigWindow(this);
         _debugWindow  = new DebugWindow(this);
         _worldOverlay = new WorldOverlay(this);
@@ -90,6 +110,7 @@ public class Plugin : IDalamudPlugin
     public void Dispose()
     {
         Framework.Update                       -= OnFrameworkUpdate;
+        AxisFont?.Dispose();
         _netListener.Dispose();
         _omenManager.Dispose();
         _vfxTracker.Dispose();

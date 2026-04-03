@@ -135,9 +135,10 @@ public class CastScanner
                     TotalCastTime:    ev.CastTime,
                     Heading:          ev.Rotation,
                     TargetPosition:   new Vector3(ev.TargetX, ev.TargetY, ev.TargetZ),
-                    DetectionSource:  "NET",
-                    IndicatorType:    "NONE",
-                    ShapeInfo:        "");
+                    DetectionSource:      "NET",
+                    IndicatorType:        "NONE",
+                    ShapeInfo:            "",
+                    CasterHitboxRadius:   obj.HitboxRadius);
 
                 if (isNew)
                 {
@@ -155,7 +156,9 @@ public class CastScanner
 
             while (_netListener.ActionResolves.TryDequeue(out var ev))
             {
-                DebugLog.Add("RESOLVE", $"Action {ev.ActionId} from 0x{ev.EntityId:X}");
+                // Only log RESOLVE for enemy entities (0x4000xxxx range) — skip player spam
+                if ((ev.EntityId & 0xFF000000) == 0x40000000)
+                    DebugLog.Add("RESOLVE", $"Action {ev.ActionId} from 0x{ev.EntityId:X}");
                 _active.Remove(ev.EntityId);
             }
 
@@ -329,11 +332,12 @@ public class CastScanner
 
                 _active[entityId] = cast with
                 {
-                    Progress       = progress,
-                    HasOmen        = hasOmen,
-                    CasterPosition = obj.Position,
-                    IndicatorType  = indicatorType,
-                    ShapeInfo      = shapeInfo,
+                    Progress            = progress,
+                    HasOmen             = hasOmen,
+                    CasterPosition      = obj.Position,
+                    IndicatorType       = indicatorType,
+                    ShapeInfo           = shapeInfo,
+                    CasterHitboxRadius  = obj.HitboxRadius,
                 };
             }
 
@@ -385,9 +389,6 @@ public class CastScanner
 
                 float progress = ComputeHookOmenProgress(obj, hookOmen);
                 _omenManager.RecolorInstance(instancePtr, progress);
-                Plugin.Log.Debug(
-                    "[Sentinel][HOOK-RECOLOR] Omen VfxData=0x{V:X} entity=0x{A:X} (progress={P:F2})",
-                    vfxDataPtr, hookOmen.EntityAddress, progress);
             }
 
             foreach (var key in hookToRemove)

@@ -132,6 +132,10 @@ public class ConfigWindow : Window
                 ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.AlphaPreview);
             ImGui.SameLine();
             ImGui.Text("Label color");
+            ImGui.SetNextItemWidth(200f);
+            changed |= ImGui.SliderFloat("##actionNameSize", ref Config.ActionNameSize, 10f, 36f, "%.0f px");
+            ImGui.SameLine();
+            ImGui.Text("Text size");
         }
 
         ImGui.Spacing();
@@ -140,7 +144,18 @@ public class ConfigWindow : Window
         // ── Hit Detection ─────────────────────────────────────────────────
         ImGui.Text("Hit Detection:");
         changed |= ImGui.Checkbox("Warn when standing in AoE", ref Config.ShowHitWarning);
-        ImGui.TextDisabled("  Displays a warning indicator when you are inside an active AoE zone.");
+        ImGui.TextDisabled("  Shows ! / !! / !!! based on the size of the AoE you are standing in.");
+        if (Config.ShowHitWarning)
+        {
+            changed |= ImGui.ColorEdit4("##hitWarnColor", ref Config.HitWarningColor,
+                ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.AlphaPreview);
+            ImGui.SameLine();
+            ImGui.Text("Warning color");
+            ImGui.SetNextItemWidth(200f);
+            changed |= ImGui.SliderFloat("##hitWarnSize", ref Config.HitWarningSize, 16f, 72f, "%.0f px");
+            ImGui.SameLine();
+            ImGui.Text("Text size");
+        }
 
         ImGui.Spacing();
         ImGui.Separator();

@@ -63,6 +63,10 @@ public class Configuration : IPluginConfiguration
     // Danger warning when player stands inside an active AoE
     public bool    ShowHitWarning   = true;
     public Vector4 HitWarningColor  = new(1f, 0.2f, 0.2f, 1f);
+    public float   HitWarningSize   = 36f;     // pixel size of the warning text
+
+    // Action name floating labels — size
+    public float   ActionNameSize   = 18f;     // pixel size of action name labels
 
     public void Save() => Plugin.PluginInterface.SavePluginConfig(this);
 }
