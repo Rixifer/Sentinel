@@ -3,10 +3,13 @@ using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
 using Sentinel.Data;
+using Sentinel.Structs;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
 using LuminaAction = Lumina.Excel.Sheets.Action;
+using CSCharacter  = FFXIVClientStructs.FFXIV.Client.Game.Character.Character;
+using CSBattleChara = FFXIVClientStructs.FFXIV.Client.Game.Character.BattleChara;
 
 namespace Sentinel.Core;
 
@@ -55,13 +58,9 @@ public class CastScanner
     public int ActiveCastCount => _active.Count;
     public IReadOnlyDictionary<nint, HookTrackedOmen> HookOmens => _hookOmens;
 
-    // VfxContainer[6] offset from BattleChara base:
-    //   Character (base, offset 0x0)
-    //   → Vfx (VfxContainer, offset 0x1988)
-    //   → _vfxData array (offset 0x18 within VfxContainer)
-    //   → slot [6] (each Pointer<VfxData> is 8 bytes, so 6 * 8 = 0x30)
-    //   Total: 0x1988 + 0x18 + 0x30 = 0x19D0
-    private const int VfxContainerOmenOffset = 0x19D0;
+    // VfxData fields mapped locally in Sentinel.Structs.VfxOmenData (Instance at 0x1B8)
+    // and VfxOmenResourceInstance (Scale at 0x90, Color at 0xA0).
+    // FFXIVClientStructs declares VfxData but has no fields — ours are from GoodOmen + Pictomancy.
 
     public int LastScanEntityCount { get; private set; }
     public int LastScanCastCount   { get; private set; }
@@ -163,9 +162,8 @@ public class CastScanner
                 if ((ev.EntityId & 0xFF000000) == 0x40000000)
                     DebugLog.Add("RESOLVE", $"Action {ev.ActionId} from 0x{ev.EntityId:X}");
 
-                // Don't remove immediately — force progress to 1.0 and let the omen
-                // keep rendering at the end color until the game destroys the VFX.
-                // Without this, the server resolves early and the gradient never reaches the end.
+                // Don't remove immediately — keep at progress=1.0 so the cast bar shows full
+                // completion for a short window while the game tears down the VFX.
                 if (_active.TryGetValue(ev.EntityId, out var resolved))
                     _active[ev.EntityId] = resolved with { Progress = 1.0f, ResolvedTicks = Environment.TickCount64 };
                 else
@@ -234,13 +232,22 @@ public class CastScanner
                     continue;
                 }
 
-                // Entity alive but no longer casting (mob died mid-cast, or cast ended
-                // without ActionResolve/CastCancel). Clean up immediately.
-                if (!bchara.IsCasting)
-                    continue; // stays in toRemove → gets removed
+                // Read cast progress directly from CastInfo — same source as the game's own cast bar.
+                // This eliminates wall-clock drift and gives exact progress even after slidecast.
+                float progress;
+                unsafe
+                {
+                    var castInfo = &((CSBattleChara*)obj.Address)->CastInfo;
 
-                float elapsed  = (Environment.TickCount64 - cast.StartTimeTicks) / 1000f;
-                float progress = Math.Clamp(elapsed / cast.TotalCastTime, 0f, 1f);
+                    // Stale check: if the entity stopped casting without ActionResolve/CastCancel,
+                    // the cast is orphaned (mob died, cast was interrupted by a mechanic, etc.).
+                    if (!castInfo->IsCasting)
+                        continue; // stays in toRemove → gets removed
+
+                    float cur   = castInfo->CurrentCastTime;
+                    float total = castInfo->TotalCastTime;
+                    progress    = total > 0f ? Math.Clamp(cur / total, 0f, 1f) : 0f;
+                }
 
                 uint actionId         = cast.ActionId;
                 bool isGroundTargeted = cast.IsGroundTargeted;
@@ -289,40 +296,40 @@ public class CastScanner
                 float hookRotation       = 0f;  // captured from HookTrackedOmen.OmenRotation (a5)
                 unsafe
                 {
-                    nint addr       = obj.Address;
-                    nint vfxDataPtr = *(nint*)((byte*)addr + VfxContainerOmenOffset);
-                    if (vfxDataPtr != nint.Zero)
+                    // Typed access: Character.Vfx = VfxContainer (at +0x1988).
+                    // VfxContainer._vfxData is internal — access via fixed offset within the container:
+                    //   _vfxData array at VfxContainer+0x18, slot[6] = +6*8 = +0x30 → total +0x48
+                    var character  = (CSCharacter*)obj.Address;
+                    var vfxOmen = *(VfxOmenData**)
+                        ((byte*)&character->Vfx + 0x18 + 6 * 8);
+                    if (vfxOmen != null && vfxOmen->Instance != null)
                     {
-                        nint instancePtr = *(nint*)((byte*)vfxDataPtr + 0x1B8);
-                        if (instancePtr != nint.Zero)
+                        hasOmen       = true;
+                        indicatorType = "NATIVE";
+                        // Remove ALL hook entries for this entity — Step 3 won't double-process them.
+                        // Capture OmenRadius (a6), OmenId (a1), OmenRotation (a5) from the first match.
+                        float capturedRadius   = 0f;
+                        uint  capturedOmenId   = 0;
+                        float capturedRotation = 0f;
+                        var toRemoveFromHook = new List<nint>();
+                        foreach (var kv in _hookOmens)
                         {
-                            hasOmen      = true;
-                            indicatorType = "NATIVE";
-                            // Remove ALL hook entries for this entity — Step 3 won't double-process them.
-                            // Capture OmenRadius (a6), OmenId (a1), OmenRotation (a5) from the first match.
-                            float capturedRadius   = 0f;
-                            uint  capturedOmenId   = 0;
-                            float capturedRotation = 0f;
-                            var toRemoveFromHook = new List<nint>();
-                            foreach (var kv in _hookOmens)
+                            if (kv.Value.EntityAddress == obj.Address)
                             {
-                                if (kv.Value.EntityAddress == obj.Address)
+                                toRemoveFromHook.Add(kv.Key);
+                                if (capturedRadius == 0f)
                                 {
-                                    toRemoveFromHook.Add(kv.Key);
-                                    if (capturedRadius == 0f)
-                                    {
-                                        capturedRadius   = kv.Value.OmenRadius;
-                                        capturedOmenId   = kv.Value.OmenId;
-                                        capturedRotation = kv.Value.OmenRotation;
-                                    }
+                                    capturedRadius   = kv.Value.OmenRadius;
+                                    capturedOmenId   = kv.Value.OmenId;
+                                    capturedRotation = kv.Value.OmenRotation;
                                 }
                             }
-                            foreach (var hookKey in toRemoveFromHook)
-                                _hookOmens.Remove(hookKey);
-                            omenRadiusFromHook = capturedRadius;
-                            hookOmenId         = capturedOmenId;
-                            hookRotation       = capturedRotation;
                         }
+                        foreach (var hookKey in toRemoveFromHook)
+                            _hookOmens.Remove(hookKey);
+                        omenRadiusFromHook = capturedRadius;
+                        hookOmenId         = capturedOmenId;
+                        hookRotation       = capturedRotation;
                     }
                 }
 
@@ -340,12 +347,12 @@ public class CastScanner
                             targetLocation = packetTarget;
                         else
                         {
+                            // Fallback: read TargetLocation from CastInfo (BattleChara+0x2790+0x20 = 0x27B0).
                             unsafe
                             {
-                                nint addr = obj.Address;
-                                var loc = *(Vector3*)((byte*)addr + 0x27B0);
+                                var loc = ((CSBattleChara*)obj.Address)->CastInfo.TargetLocation;
                                 if (loc.X != 0f || loc.Z != 0f)
-                                    targetLocation = loc;
+                                    targetLocation = new Vector3(loc.X, loc.Y, loc.Z);
                             }
                         }
                     }
@@ -418,8 +425,13 @@ public class CastScanner
             foreach (var kvp in _hookOmens)
             {
                 nint vfxDataPtr = kvp.Key;
+                // Read Instance from VfxOmenData struct — null means omen is destroyed
                 nint instancePtr;
-                unsafe { instancePtr = *(nint*)((byte*)vfxDataPtr + 0x1B8); }
+                unsafe
+                {
+                    var vfxOmen = (VfxOmenData*)vfxDataPtr;
+                    instancePtr = (nint)(vfxOmen->Instance);
+                }
 
                 if (instancePtr == nint.Zero)
                 {
@@ -443,8 +455,7 @@ public class CastScanner
     // ── Helpers ───────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Rebuilds the per-frame entity maps. Called lazily — at most once per Scan().
-    /// Populates both _entityMap (by GameObjectId) and _addressMap (by Address).
+    /// Rebuilds the per-frame entity map. Called lazily — at most once per Scan().
     /// </summary>
     private void BuildEntityMaps()
     {

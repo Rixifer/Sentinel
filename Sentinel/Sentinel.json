@@ -4,7 +4,7 @@
     "Punchline": "Ground-projected AoE visualization for all content",
     "Description": "Enhances AoE indicators with custom colors, cast bars, and hit detection. Reveals untelegraphed mechanics. Complements BossModReborn.",
     "InternalName": "Sentinel",
-    "AssemblyVersion": "0.4.2.0",
+    "AssemblyVersion": "0.4.3.0",
     "RepoUrl": "https://github.com/Rixifer/Sentinel",
     "ApplicableVersion": "any",
     "Tags": ["combat", "ui", "overlay"],

@@ -11,6 +11,7 @@ namespace Sentinel.Core;
 /// </summary>
 public static unsafe class VfxFunctions
 {
+    // UpdateVfxColor is used by OmenVfx.UpdateColor (Phase 2 custom omens).
     public const string UpdateVfxColorSig = "E8 ?? ?? ?? ?? 8B 4B F3";
     public delegate long UpdateVfxColorDelegate(nint vfxResourceInstance, float r, float g, float b, float a);
     public static UpdateVfxColorDelegate? UpdateVfxColor;
@@ -51,7 +52,6 @@ public static unsafe class VfxFunctions
     public static bool HasRotateMatrix      => RotateMatrix      != null;
 
     // ── Resolved addresses (nint.Zero if failed) ───────────────────────────
-    // Properties backed by private static fields so they can be passed as `out` params.
     private static nint _addrUpdateVfxColor;
     private static nint _addrVfxInitDataCtor;
     private static nint _addrCreateVfx;
