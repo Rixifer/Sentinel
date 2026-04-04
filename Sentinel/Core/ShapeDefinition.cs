@@ -56,8 +56,10 @@ public record struct ActiveCast(
     // ── Caster geometry ───────────────────────────────────────────────────
     float   CasterHitboxRadius, // IGameObject.HitboxRadius — for non-ground-targeted radius adjustment
     // ── Hook-captured omen data ───────────────────────────────────────────
-    float?  OmenRadius,         // a6 from CreateOmen (authoritative outer radius, already includes hitbox);
-                                // null for custom/Phase-2 omens — use Lumina + hitbox calculation instead
+    float?  OmenRadius,          // a6 from CreateOmen (authoritative outer radius, already includes hitbox);
+                                 // null for custom/Phase-2 omens — use Lumina + hitbox calculation instead
+    uint    HookOmenId   = 0,    // a1 from CreateOmen — authoritative omen row ID (may differ from Lumina)
+    float?  HookHeading  = null, // a5 from CreateOmen — authoritative omen direction for cones/rects
     // ── Resolved cast persistence ─────────────────────────────────────────────
     long    ResolvedTicks = 0    // 0 = still active; >0 = TickCount64 when ActionResolve arrived
 );

@@ -46,6 +46,8 @@ public class CastScanner
         public nint  EntityAddress; // entity it's attached to (for cast bar lookup)
         public long  CreationTicks;
         public float OmenRadius;    // a6 from CreateOmen — authoritative outer radius
+        public uint  OmenId;        // a1 from CreateOmen — authoritative omen row ID
+        public float OmenRotation;  // a5 from CreateOmen — authoritative omen direction (radians)
     }
 
     // ── Debug-facing properties ────────────────────────────────────────────
@@ -189,6 +191,8 @@ public class CastScanner
                 EntityAddress = hookEv.EntityAddress,
                 CreationTicks = hookEv.CreationTicks,
                 OmenRadius    = hookEv.OmenRadius,
+                OmenId        = hookEv.OmenId,
+                OmenRotation  = hookEv.OmenRotation,
             });
             if (added)
                 DebugLog.Add("HOOK-OMEN",
@@ -222,13 +226,18 @@ public class CastScanner
                 if (cast.ResolvedTicks > 0)
                 {
                     float sinceDeath = (Environment.TickCount64 - cast.ResolvedTicks) / 1000f;
-                    if (sinceDeath > 2.0f)
+                    if (sinceDeath > 0.5f)
                         continue; // will be cleaned up by toRemove (still in set)
 
                     toRemove.Remove(entityId);
                     _result.Add(cast);
                     continue;
                 }
+
+                // Entity alive but no longer casting (mob died mid-cast, or cast ended
+                // without ActionResolve/CastCancel). Clean up immediately.
+                if (!bchara.IsCasting)
+                    continue; // stays in toRemove → gets removed
 
                 float elapsed  = (Environment.TickCount64 - cast.StartTimeTicks) / 1000f;
                 float progress = Math.Clamp(elapsed / cast.TotalCastTime, 0f, 1f);
@@ -273,9 +282,11 @@ public class CastScanner
                 if (excludeFromCustom)
                     indicatorType = "EXCLUDED";
 
-                // Phase 1: Detect native game omen (VfxContainer read for HasOmen + hook radius)
+                // Phase 1: Detect native game omen (VfxContainer read for HasOmen + hook data)
                 bool  hasOmen          = false;
                 float omenRadiusFromHook = 0f; // captured from HookTrackedOmen.OmenRadius (a6)
+                uint  hookOmenId         = 0;   // captured from HookTrackedOmen.OmenId   (a1)
+                float hookRotation       = 0f;  // captured from HookTrackedOmen.OmenRotation (a5)
                 unsafe
                 {
                     nint addr       = obj.Address;
@@ -288,20 +299,29 @@ public class CastScanner
                             hasOmen      = true;
                             indicatorType = "NATIVE";
                             // Remove ALL hook entries for this entity — Step 3 won't double-process them.
-                            // Capture OmenRadius (a6) from the first matching hook entry while we can.
-                            float hookRadius = 0f;
+                            // Capture OmenRadius (a6), OmenId (a1), OmenRotation (a5) from the first match.
+                            float capturedRadius   = 0f;
+                            uint  capturedOmenId   = 0;
+                            float capturedRotation = 0f;
                             var toRemoveFromHook = new List<nint>();
                             foreach (var kv in _hookOmens)
                             {
                                 if (kv.Value.EntityAddress == obj.Address)
                                 {
                                     toRemoveFromHook.Add(kv.Key);
-                                    if (hookRadius == 0f) hookRadius = kv.Value.OmenRadius;
+                                    if (capturedRadius == 0f)
+                                    {
+                                        capturedRadius   = kv.Value.OmenRadius;
+                                        capturedOmenId   = kv.Value.OmenId;
+                                        capturedRotation = kv.Value.OmenRotation;
+                                    }
                                 }
                             }
                             foreach (var hookKey in toRemoveFromHook)
                                 _hookOmens.Remove(hookKey);
-                            omenRadiusFromHook = hookRadius;
+                            omenRadiusFromHook = capturedRadius;
+                            hookOmenId         = capturedOmenId;
+                            hookRotation       = capturedRotation;
                         }
                     }
                 }
@@ -367,10 +387,14 @@ public class CastScanner
                     IndicatorType      = indicatorType,
                     ShapeInfo          = shapeInfo,
                     CasterHitboxRadius = obj.HitboxRadius,
-                    // Populate OmenRadius from hook data for native omens (a6 = authoritative radius).
-                    // Null for custom Phase-2 omens — WorldOverlay uses Lumina + hitbox there.
+                    // Hook-captured a6: authoritative outer radius for native omens.
+                    // Null for custom/Phase-2 omens — WorldOverlay uses Lumina + hitbox there.
                     OmenRadius         = indicatorType == "NATIVE" && omenRadiusFromHook > 0f
                                             ? omenRadiusFromHook : (float?)null,
+                    // Hook-captured a1 + a5: authoritative omen ID and direction.
+                    // Used by WorldOverlay Tier 1 shape resolution when Lumina OmenId is 0.
+                    HookOmenId         = hookOmenId,
+                    HookHeading        = hookOmenId > 0 ? hookRotation : (float?)null,
                 };
             }
 

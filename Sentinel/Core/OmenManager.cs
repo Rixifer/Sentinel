@@ -15,6 +15,8 @@ public struct HookOmenEvent
     public nint  EntityAddress; // a2 parameter — the entity the omen is attached to
     public long  CreationTicks; // Environment.TickCount64 at hook time
     public float OmenRadius;    // a6 parameter — authoritative outer radius (already includes hitbox)
+    public uint  OmenId;        // a1 parameter — omen sheet row ID (authoritative, may differ from Lumina)
+    public float OmenRotation;  // a5 parameter — authoritative omen direction in radians
 }
 
 public unsafe class OmenManager : IDisposable
@@ -132,6 +134,8 @@ public unsafe class OmenManager : IDisposable
                 EntityAddress = a2,
                 CreationTicks = Environment.TickCount64,
                 OmenRadius    = a6,
+                OmenId        = a1,
+                OmenRotation  = a5,
             });
             DebugLog.Add("HOOK-OMEN",
                 $"VfxData=0x{((nint)vfx):X} entity=0x{a2:X} omenId={a1}");

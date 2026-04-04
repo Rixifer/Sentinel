@@ -404,10 +404,12 @@ public class WorldOverlay
         radius    = 0f;
         dist      = 0f;
 
-        // Tier 1: omen path (exact shape type, cone angle, donut ratio)
-        ShapeParams shape    = default;
-        bool fromOmenPath    = cast.OmenId > 0 &&
-                               TryGetShapeFromOmenPath(cast.OmenId, cast.ActionId, out shape);
+        // Tier 1: omen path (exact shape type, cone angle, donut ratio).
+        // Prefer hook-captured OmenId (a1) — it's authoritative even when Lumina returns 0.
+        ShapeParams shape   = default;
+        uint effectiveOmenId = cast.OmenId > 0 ? cast.OmenId : cast.HookOmenId;
+        bool fromOmenPath    = effectiveOmenId > 0 &&
+                               TryGetShapeFromOmenPath(effectiveOmenId, cast.ActionId, out shape);
         // Tier 2: ShapeInfo string (custom omens)  |  Tier 3: CastType fallback
         if (!fromOmenPath && !ParseShapeInfo(cast.ShapeInfo, out shape))
             GetShapeFromLumina(cast.CastType, cast.ActionId, out shape);
@@ -462,7 +464,11 @@ public class WorldOverlay
         var origin2D = new Vector2(origin3D.X, origin3D.Z);
         dist = Vector2.Distance(playerPos, origin2D);
 
-        return IsPointInShape(playerPos, origin2D, cast.Heading, shape);
+        // Use hook-captured a5 when available — it's the authoritative omen direction.
+        // The CastStart packet's Rotation can differ (e.g. stored as target heading, not omen heading).
+        float heading = cast.HookHeading ?? cast.Heading;
+
+        return IsPointInShape(playerPos, origin2D, heading, shape);
     }
 
     private static bool IsPointInShape(Vector2 point, Vector2 origin,
@@ -663,7 +669,13 @@ public class WorldOverlay
         if (path == null) return false;
 
         ShapeType? shapeType = OmenPathDecoder.InferShapeType(path);
-        if (shapeType == null) return false;
+        if (shapeType == null)
+        {
+            Plugin.Log.Debug(
+                "[Sentinel][OMEN-SHAPE] Unrecognized omen path for OmenId={Id}: \"{Path}\"",
+                omenId, path);
+            return false;
+        }
 
         switch (shapeType.Value)
         {

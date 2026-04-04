@@ -12,7 +12,7 @@ public enum OmenStyle
 
 public class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 15;
+    public int Version { get; set; } = 16;
 
     // Master switch
     public bool Enabled = true;
